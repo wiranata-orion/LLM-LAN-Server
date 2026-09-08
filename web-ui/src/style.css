@@ -10,8 +10,8 @@
   --color-bg-sidebar: #0e0e1a;
 
   --color-text-primary: #e4e4ed;
-  --color-text-secondary: #9595ad;
-  --color-text-muted: #5e5e78;
+  --color-text-secondary: #b0b0c5;
+  --color-text-muted: #8585a0;
   --color-text-accent: #a78bfa;
 
   --color-accent: #8b5cf6;
@@ -19,8 +19,8 @@
   --color-accent-glow: rgba(139, 92, 246, 0.25);
   --color-accent-subtle: rgba(139, 92, 246, 0.08);
 
-  --color-border: #1e1e35;
-  --color-border-light: #2a2a45;
+  --color-border: #30304d;
+  --color-border-light: #454568;
 
   --color-user-bubble: #8b5cf6;
   --color-user-bubble-text: #ffffff;
@@ -32,6 +32,179 @@
 
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+}
+
+/* ===== Theme Variations ===== */
+:root,
+[data-theme="xufruz"] {
+  --color-bg-primary: #0a0a12;
+  --color-bg-secondary: #12121e;
+  --color-bg-tertiary: #1a1a2e;
+  --color-bg-input: #16162a;
+  --color-bg-hover: #1f1f3a;
+  --color-bg-sidebar: #0e0e1a;
+
+  --color-text-primary: #e4e4ed;
+  --color-text-secondary: #b0b0c5;
+  --color-text-muted: #8585a0;
+  --color-text-accent: #a78bfa;
+
+  --color-accent: #8b5cf6;
+  --color-accent-hover: #7c3aed;
+  --color-accent-glow: rgba(139, 92, 246, 0.25);
+  --color-accent-subtle: rgba(139, 92, 246, 0.1);
+
+  --color-border: #30304d;
+  --color-border-light: #454568;
+
+  --color-user-bubble: #8b5cf6;
+  --color-user-bubble-text: #ffffff;
+  --color-ai-bubble: #16162a;
+  --color-ai-bubble-text: #e4e4ed;
+  --color-glass: rgba(18, 18, 30, 0.85);
+}
+
+[data-theme="cyberpunk"] {
+  --color-bg-primary: #06110f;
+  --color-bg-secondary: #0b1a17;
+  --color-bg-tertiary: #102722;
+  --color-bg-input: #0e211d;
+  --color-bg-hover: #15332d;
+  --color-bg-sidebar: #081613;
+
+  --color-text-primary: #e2f5ee;
+  --color-text-secondary: #a6d0c2;
+  --color-text-muted: #72a995;
+  --color-text-accent: #34d399;
+
+  --color-accent: #10b981;
+  --color-accent-hover: #059669;
+  --color-accent-glow: rgba(16, 185, 129, 0.3);
+  --color-accent-subtle: rgba(16, 185, 129, 0.12);
+
+  --color-border: #245247;
+  --color-border-light: #347363;
+
+  --color-user-bubble: #10b981;
+  --color-user-bubble-text: #ffffff;
+  --color-ai-bubble: #0e211d;
+  --color-ai-bubble-text: #e2f5ee;
+  --color-glass: rgba(11, 26, 23, 0.85);
+}
+
+[data-theme="oled"] {
+  --color-bg-primary: #000000;
+  --color-bg-secondary: #0a0a0a;
+  --color-bg-tertiary: #141414;
+  --color-bg-input: #121212;
+  --color-bg-hover: #1f1f1f;
+  --color-bg-sidebar: #050505;
+
+  --color-text-primary: #f3f4f6;
+  --color-text-secondary: #c1c7d0;
+  --color-text-muted: #8b95a3;
+  --color-text-accent: #60a5fa;
+
+  --color-accent: #3b82f6;
+  --color-accent-hover: #2563eb;
+  --color-accent-glow: rgba(59, 130, 246, 0.25);
+  --color-accent-subtle: rgba(59, 130, 246, 0.12);
+
+  --color-border: #383838;
+  --color-border-light: #555555;
+
+  --color-user-bubble: #3b82f6;
+  --color-user-bubble-text: #ffffff;
+  --color-ai-bubble: #121212;
+  --color-ai-bubble-text: #f3f4f6;
+  --color-glass: rgba(10, 10, 10, 0.9);
+}
+
+/* ===== TEMA TERANG (LIGHT) ===== */
+[data-theme="light"] {
+  --color-bg-primary: #f8fafc;
+  --color-bg-secondary: #ffffff;
+  --color-bg-tertiary: #e8eef5;
+  --color-bg-input: #ffffff;
+  --color-bg-hover: #e2e8f0;
+  --color-bg-sidebar: #edf2f7;
+
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-muted: #64748b;
+  --color-text-accent: #4f46e5;
+
+  --color-accent: #4f46e5;
+  --color-accent-hover: #4338ca;
+  --color-accent-glow: rgba(79, 70, 229, 0.22);
+  --color-accent-subtle: rgba(79, 70, 229, 0.08);
+
+  --color-border: #e2e8f0;
+  --color-border-light: #94a3b8;
+
+  --color-user-bubble: #4f46e5;
+  --color-user-bubble-text: #ffffff;
+  --color-ai-bubble: #ffffff;
+  --color-ai-bubble-text: #0f172a;
+  --color-glass: rgba(255, 255, 255, 0.9);
+}
+
+/* ===== TEMA ABU-ABU (GREY / GRAPHITE) ===== */
+[data-theme="grey"] {
+  --color-bg-primary: #18191c;
+  --color-bg-secondary: #222428;
+  --color-bg-tertiary: #2c2f35;
+  --color-bg-input: #202226;
+  --color-bg-hover: #33363e;
+  --color-bg-sidebar: #141517;
+
+  --color-text-primary: #f3f4f6;
+  --color-text-secondary: #c4cad3;
+  --color-text-muted: #a2acb9;
+  --color-text-accent: #cbd5e1;
+
+  --color-accent: #64748b;
+  --color-accent-hover: #475569;
+  --color-accent-glow: rgba(100, 116, 139, 0.3);
+  --color-accent-subtle: rgba(100, 116, 139, 0.14);
+
+  --color-border: #454b55;
+  --color-border-light: #5c6572;
+
+  --color-user-bubble: #475569;
+  --color-user-bubble-text: #f8fafc;
+  --color-ai-bubble: #222428;
+  --color-ai-bubble-text: #f3f4f6;
+  --color-glass: rgba(34, 36, 40, 0.88);
+}
+
+/* ===== TEMA GELAP (DARK / MIDNIGHT) ===== */
+[data-theme="dark"] {
+  --color-bg-primary: #0b0f19;
+  --color-bg-secondary: #111827;
+  --color-bg-tertiary: #1f2937;
+  --color-bg-input: #151e2e;
+  --color-bg-hover: #243044;
+  --color-bg-sidebar: #080c14;
+
+  --color-text-primary: #f9fafb;
+  --color-text-secondary: #c3ccd9;
+  --color-text-muted: #94a3b8;
+  --color-text-accent: #38bdf8;
+
+  --color-accent: #0ea5e9;
+  --color-accent-hover: #0284c7;
+  --color-accent-glow: rgba(14, 165, 233, 0.28);
+  --color-accent-subtle: rgba(14, 165, 233, 0.1);
+
+  --color-border: #2d3b52;
+  --color-border-light: #465a76;
+
+  --color-user-bubble: #0ea5e9;
+  --color-user-bubble-text: #ffffff;
+  --color-ai-bubble: #111827;
+  --color-ai-bubble-text: #f9fafb;
+  --color-glass: rgba(17, 24, 39, 0.88);
 }
 
 /* ===== Global Base ===== */
@@ -124,7 +297,7 @@ textarea {
 }
 
 .markdown-body pre {
-  background: #0d0d19;
+  background: var(--color-bg-input, #0d0d19);
   border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 1em;
@@ -254,12 +427,12 @@ textarea {
 
 /* ===== Glassmorphism Utility ===== */
 .glass {
-  background: rgba(18, 18, 30, 0.8);
+  background: var(--color-glass, rgba(18, 18, 30, 0.85));
   backdrop-filter: blur(12px);
   border: 1px solid var(--color-border);
 }
 
 /* ===== Glow Effect ===== */
 .glow-accent {
-  box-shadow: 0 0 20px var(--color-accent-glow), 0 0 60px rgba(139, 92, 246, 0.08);
+  box-shadow: 0 0 20px var(--color-accent-glow), 0 0 40px var(--color-accent-subtle);
 }
