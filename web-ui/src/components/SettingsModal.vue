@@ -93,18 +93,107 @@ function resetDefaults() {
             <p class="form-hint">Kreativitas respons (0 = deterministik, 2 = sangat kreatif)</p>
           </div>
 
-          <!-- Max Tokens -->
-          <div class="form-group">
-            <label for="max-tokens-input" class="form-label">Max Tokens</label>
-            <input
-              id="max-tokens-input"
-              v-model="maxTokens"
-              type="number"
-              class="form-input"
-              placeholder="Default (unlimited)"
-              min="1"
-            />
-            <p class="form-hint">Batas maksimum token yang dihasilkan</p>
+            <!-- Max Tokens -->
+            <div class="form-group">
+              <label for="max-tokens-input" class="form-label">Max Tokens (num_predict)</label>
+              <input
+                id="max-tokens-input"
+                v-model="maxTokens"
+                type="text"
+                class="form-input form-input--compact"
+                placeholder="Kosongkan untuk tanpa batas (unlimited)"
+                min="1"
+              />
+              <p class="form-hint">Batas maksimum token balasan yang dihasilkan LLM.</p>
+            </div>
+          </div>
+
+          <!-- TAB 3: TEMA TAMPILAN -->
+          <div v-if="activeTab === 'theme'" class="tab-pane">
+            <div class="section-title-group">
+              <span class="section-title">Pilih Skema Warna UI</span>
+              <span class="section-desc">Pratinjau langsung aktif saat dipilih. Klik "Simpan Perubahan" untuk menyimpan permanen, atau tombol X untuk membatalkan.</span>
+            </div>
+
+            <div class="themes-grid">
+              <div
+                v-for="t in themesList"
+                :key="t.id"
+                class="theme-card"
+                :class="{ 'theme-card--active': theme === t.id }"
+                @click="selectTheme(t.id)"
+              >
+                <div class="theme-swatch-box" :style="{ background: t.bg }">
+                  <div class="theme-accent-pill" :style="{ background: t.accent }"></div>
+                  <div class="theme-sub-pill" :style="{ background: t.accent, opacity: 0.25 }"></div>
+                </div>
+                <div class="theme-info">
+                  <div class="theme-name-row">
+                    <span class="theme-name">{{ t.name }}</span>
+                    <Check v-if="theme === t.id" :size="14" class="theme-check-icon" />
+                  </div>
+                  <span class="theme-desc">{{ t.desc }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 4: PENYIMPANAN / MEMORY (.json) -->
+          <div v-if="activeTab === 'storage'" class="tab-pane">
+            <div class="section-title-group">
+              <span class="section-title">Penyimpanan Memory & Cadangan (.json)</span>
+              <span class="section-desc">Pilih folder fisik di Laptop atau Flashdisk untuk menyimpan riwayat chat Anda</span>
+            </div>
+
+            <!-- Physical Folder Picker Box -->
+            <div class="storage-box glass">
+              <div class="storage-box-header">
+                <div class="storage-icon-circle">
+                  <Folder :size="18" />
+                </div>
+                <div class="storage-header-text">
+                  <span class="storage-box-title">Folder Penyimpanan Fisik</span>
+                  <span class="storage-box-sub">
+                    {{ selectedStorageDir ? `Folder Terhubung: ${selectedStorageDir}` : 'Belum ada folder fisik yang dipilih' }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="storage-actions-row">
+                <button class="btn btn--secondary" @click="pickPhysicalFolder">
+                  <Folder :size="14" />
+                  <span>{{ selectedStorageDir ? 'Ganti Folder' : 'Pilih Folder (Laptop / Flashdisk)' }}</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Export / Import Buttons -->
+            <div class="export-import-grid">
+              <!-- Export Card -->
+              <div class="backup-card glass">
+                <Download :size="18" class="backup-icon" />
+                <div class="backup-info">
+                  <span class="backup-title">Export Riwayat Chat</span>
+                  <span class="backup-desc">Unduh seluruh percakapan dan folder dalam format file .json</span>
+                </div>
+                <button class="btn btn--secondary btn--compact" @click="exportJsonFile">
+                  Unduh .json
+                </button>
+              </div>
+
+              <!-- Import Card -->
+              <div class="backup-card glass">
+                <Upload :size="18" class="backup-icon" />
+                <div class="backup-info">
+                  <span class="backup-title">Import Riwayat Chat</span>
+                  <span class="backup-desc">Pulihkan percakapan dari file cadangan .json di Flashdisk / Laptop</span>
+                </div>
+                <label class="btn btn--secondary btn--compact file-input-label">
+                  Pilih File
+                  <input type="file" accept=".json" class="file-hidden-input" @change="handleFileInput" />
+                </label>
+              </div>
+            </div>
           </div>
         </div>
 
