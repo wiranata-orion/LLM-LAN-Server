@@ -1,8 +1,8 @@
 <script setup>
-import { ref, nextTick, watch, onMounted } from 'vue'
+import { ref, nextTick, watch, onMounted, computed } from 'vue'
 import MessageBubble from './MessageBubble.vue'
 import ChatInput from './ChatInput.vue'
-import { Bot, Sparkles, Cpu, Zap } from 'lucide-vue-next'
+import { Bot, Sparkles, Cpu, Zap, Copy, Check, RefreshCw } from 'lucide-vue-next'
 
 const props = defineProps({
   messages: {
@@ -19,23 +19,47 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['send', 'stop'])
+const emit = defineEmits(['send', 'stop', 'regenerate'])
 
 const messagesContainer = ref(null)
+const userScrolling = ref(false)
 const chatInputRef = ref(null)
 
+// Show placeholder bubble while AI is generating and no assistant message yet
+const showPlaceholder = computed(() => {
+  return props.isGenerating && (
+    props.messages.length === 0 ||
+    props.messages[props.messages.length - 1].role !== 'assistant'
+  )
+})
+
 function scrollToBottom() {
+  if (userScrolling.value) return
   nextTick(() => {
     const el = messagesContainer.value
     if (el) {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+      el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
     }
   })
 }
 
+function onScroll() {
+  const el = messagesContainer.value
+  if (!el) return
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20
+  userScrolling.value = !atBottom
+}
+
 watch(
   () => props.messages,
-  () => scrollToBottom(),
+  () => {
+    const el = messagesContainer.value
+    if (el) {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20
+      if (atBottom) userScrolling.value = false
+    }
+    scrollToBottom()
+  },
   { deep: true }
 )
 
@@ -56,12 +80,23 @@ const features = [
   { icon: Cpu, title: 'Local & Private', desc: 'Berjalan di lokal tanpa internet' },
   { icon: Zap, title: 'Multi Model', desc: 'Model sesuai kebutuhan' },
 ]
+
+const copied = ref(false)
+function copyContent(text) {
+  navigator.clipboard.writeText(text)
+  copied.value = true
+  setTimeout(() => copied.value = false, 2000)
+}
+
+function emitRegenerate() {
+  emit('regenerate')
+}
 </script>
 
 <template>
   <div class="chat-view">
     <!-- Messages Area -->
-    <div ref="messagesContainer" class="messages-area">
+    <div ref="messagesContainer" class="messages-area" @scroll="onScroll">
       <!-- Welcome Screen -->
       <div v-if="messages.length === 0" class="welcome-screen">
         <div class="welcome-icon-wrapper">
@@ -82,20 +117,27 @@ const features = [
 
       <!-- Messages -->
       <template v-else>
-        <MessageBubble
-          v-for="(msg, i) in messages"
-          :key="i"
-          :message="msg"
-        />
+        <template v-for="(msg, i) in messages" :key="i">
+          <div class="message-item">
+            <MessageBubble :message="msg" :is-generating="isGenerating" />
+
+            <div v-if="msg.role === 'assistant'" class="message-actions">
+              <button class="action-btn" @click="copyContent(msg.content)" :title="copied ? 'Copied!' : 'Copy response'">
+                <Check v-if="copied" :size="14" />
+                <Copy v-else :size="14" />
+                <span>{{ copied ? 'Copied' : 'Copy' }}</span>
+              </button>
+              <button v-if="i === messages.length - 1" class="action-btn" @click="emitRegenerate" title="Regenerate response" :disabled="isGenerating" :class="{ 'action-btn--disabled': isGenerating }">
+                <RefreshCw :size="14" />
+                <span>Regenerate</span>
+              </button>
+              <span class="model-label" v-if="msg.model">{{ msg.model }}</span>
+            </div>
+          </div>
+        </template>
 
         <!-- Typing Indicator -->
-        <div v-if="isGenerating && messages[messages.length - 1]?.role !== 'assistant'" class="typing-indicator-row">
-          <div class="typing-indicator">
-            <span class="typing-dot"></span>
-            <span class="typing-dot"></span>
-            <span class="typing-dot"></span>
-          </div>
-        </div>
+        <div v-if="showPlaceholder" class="placeholder-bubble"></div>
       </template>
     </div>
 
@@ -124,7 +166,6 @@ const features = [
   padding: 16px 0;
 }
 
-/* Welcome Screen */
 .welcome-screen {
   display: flex;
   flex-direction: column;
@@ -170,10 +211,29 @@ const features = [
   letter-spacing: -0.02em;
 }
 
-.welcome-subtitle {
-  font-size: 1rem;
-  color: var(--color-text-secondary);
-  margin: 0 0 40px;
+/* Placeholder bubble animation */
+.placeholder-bubble {
+  height: 60px;
+  max-width: 600px;
+  margin: 0 auto 12px;
+  border-radius: 12px;
+  background: var(--color-placeholder, #e0e0e0);
+  position: relative;
+  overflow: hidden;
+}
+.placeholder-bubble::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -150%;
+  width: 150%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  animation: loading-shimmer 1.5s infinite;
+}
+@keyframes loading-shimmer {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(100%); }
 }
 
 .feature-cards {
@@ -215,10 +275,56 @@ const features = [
   line-height: 1.4;
 }
 
-/* Typing Indicator */
+.message-item {
+  max-width: 860px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px 12px 68px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.message-item:hover .message-actions,
+.message-item:focus-within .message-actions {
+  opacity: 1;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.action-btn--disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.model-label {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-left: 8px;
+  opacity: 0.7;
+}
+
 .typing-indicator-row {
   padding: 12px 24px;
-  max-width: 800px;
+  max-width: 860px;
   margin: 0 auto;
   width: 100%;
 }

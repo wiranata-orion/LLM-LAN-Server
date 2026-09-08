@@ -1,22 +1,20 @@
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
-import { PanelLeft } from 'lucide-vue-next'
-import { getModels, sendMessageStream } from './services/api.js'
+import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
+import { getModels, sendMessageStream, getSettings, saveSettingsToStorage } from './services/api.js'
 
 // ===== State =====
-const DEFAULT_MODELS = [
-  { name: 'qwen2.5:7b', desc: 'For Fun' },
-  { name: 'qwen2.5-coder:7b', desc: 'For Logic' },
-]
-
 const sidebarOpen = ref(true)
 const showSettings = ref(false)
-const models = ref([...DEFAULT_MODELS])
-const selectedModel = ref('qwen2.5:7b')
+const models = ref([])
+const selectedModel = ref('')
 const isGenerating = ref(false)
+const currentEngine = ref('laptop')
+const isCurrentEngineOnline = ref(null)
+const fallbackToast = ref('')
 
 // Conversation state
 const folders = reactive([])
@@ -34,12 +32,34 @@ const activeMessages = computed(() => {
   return activeConversation.value?.messages || []
 })
 
+function updateCurrentEngine() {
+  const s = getSettings()
+  currentEngine.value = s.activeEngine || 'laptop'
+}
+
+function handleEngineFallback(e) {
+  updateCurrentEngine()
+  fallbackToast.value = e.detail?.message || 'Beralih ke Laptop.'
+  fetchModels()
+  setTimeout(() => {
+    fallbackToast.value = ''
+  }, 5000)
+}
+
 // ===== Lifecycle =====
 onMounted(async () => {
   // Load saved state
   loadState()
 
-  // Fetch models
+  // Apply saved theme & engine
+  const s = getSettings()
+  if (s.theme) {
+    document.documentElement.setAttribute('data-theme', s.theme)
+  }
+  updateCurrentEngine()
+  window.addEventListener('engine-fallback', handleEngineFallback)
+
+  // Fetch real models
   await fetchModels()
 
   // If no conversations, create one
@@ -48,30 +68,41 @@ onMounted(async () => {
   }
 })
 
+onUnmounted(() => {
+  window.removeEventListener('engine-fallback', handleEngineFallback)
+})
+
 // ===== API =====
 async function fetchModels() {
-  const fetched = await getModels()
-  const map = new Map()
-
-  // Add default Qwen models
-  for (const m of DEFAULT_MODELS) {
-    map.set(m.name, { ...m })
+  try {
+    const fetched = await getModels()
+    if (fetched && fetched.length > 0) {
+      isCurrentEngineOnline.value = true
+      models.value = fetched.map((m) => {
+        const name = typeof m === 'string' ? m : (m.name || '')
+        const size = m.size ? `${(m.size / 1e9).toFixed(1)}GB` : ''
+        return {
+          name,
+          desc: m.desc || size,
+          size: m.size,
+        }
+      })
+    } else {
+      isCurrentEngineOnline.value = false
+      models.value = []
+    }
+  } catch (err) {
+    isCurrentEngineOnline.value = false
+    models.value = []
   }
 
-  // Merge with fetched models from Qwen
-  for (const m of fetched) {
-    const existing = map.get(m.name) || {}
-    map.set(m.name, {
-      ...m,
-      desc: existing.desc || (m.size ? `${(m.size / 1e9).toFixed(1)}GB` : ''),
-    })
-  }
-
-  models.value = Array.from(map.values())
-
-  if (!selectedModel.value) {
-    const first = models.value[0]
-    selectedModel.value = (typeof first === 'object' ? first.name : first) || 'qwen2.5:7b'
+  if (models.value.length > 0) {
+    const exists = models.value.some((m) => m.name === selectedModel.value)
+    if (!selectedModel.value || !exists) {
+      selectedModel.value = models.value[0].name
+    }
+  } else {
+    selectedModel.value = ''
   }
 }
 
@@ -196,7 +227,18 @@ function moveChatToFolder(chatId, targetFolderId) {
 }
 
 // ===== Messaging =====
-async function sendMessage(text) {
+
+
+function stopGeneration() {
+  if (abortController) {
+    abortController.abort()
+    abortController = null
+    isGenerating.value = false
+  }
+}
+
+// Send a user message and trigger assistant response
+function sendMessage(text) {
   if (!activeConversation.value || isGenerating.value) return
 
   // Check model
@@ -219,58 +261,102 @@ async function sendMessage(text) {
     activeConversation.value.title = text.substring(0, 50) + (text.length > 50 ? '...' : '')
   }
 
+  // Generate assistant response
+  generateAssistantResponse()
+}
+
+function handleRegenerate() {
+  const conv = activeConversation.value
+  if (!conv || isGenerating.value) return
+  // Remove the last assistant message if present
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    if (conv.messages[i].role === 'assistant') {
+      conv.messages.splice(i, 1)
+      break
+    }
+  }
+  // Generate new response
+  generateAssistantResponse()
+}
+
+function generateAssistantResponse() {
+  const conv = activeConversation.value
+  if (!conv) return
   // Add empty assistant message for streaming
-  activeConversation.value.messages.push({
+  conv.messages.push({
     role: 'assistant',
     content: '',
+    model: selectedModel.value,
   })
-
-  const assistantIdx = activeConversation.value.messages.length - 1
+  const assistantIdx = conv.messages.length - 1
   isGenerating.value = true
 
-  // Prepare messages for API (all messages in conversation)
-  const apiMessages = activeConversation.value.messages
-    .slice(0, -1) // exclude the empty assistant message
-    .map((m) => ({ role: m.role, content: m.content }))
+  const apiMessages = conv.messages
+    .slice(0, -1)
+    .map(m => ({ role: m.role, content: m.content }))
 
   abortController = new AbortController()
+  const signal = abortController.signal
 
-  await sendMessageStream({
+  sendMessageStream({
     model: selectedModel.value,
     messages: apiMessages,
-    signal: abortController.signal,
-    onToken: (token) => {
-      activeConversation.value.messages[assistantIdx].content += token
+    signal,
+    onToken: token => {
+      // Stop appending tokens if generation was aborted
+      if (signal.aborted) return
+      conv.messages[assistantIdx].content += token
     },
     onDone: () => {
       isGenerating.value = false
       abortController = null
       saveState()
     },
-    onError: (err) => {
+    onError: err => {
       isGenerating.value = false
       abortController = null
-      const errMsg = activeConversation.value.messages[assistantIdx]
+      const errMsg = conv.messages[assistantIdx]
       if (!errMsg.content) {
-        errMsg.content = `❌ Error: ${err.message}\n\nPastikan LLM sudah berjalan di server lokal Anda.`
+        errMsg.content = `Error: ${err.message}`
       }
       saveState()
     },
   })
 }
 
-function stopGeneration() {
-  if (abortController) {
-    abortController.abort()
-    abortController = null
-    isGenerating.value = false
-  }
-}
-
 // ===== Model =====
 function selectModel(modelName) {
   selectedModel.value = modelName
   saveState()
+}
+
+// ===== Engine Switching =====
+let engineToastTimer = null
+
+async function toggleEngine() {
+  const nextEngine = currentEngine.value === 'pc' ? 'laptop' : 'pc'
+  const s = getSettings()
+
+  if (nextEngine === 'pc' && (!s.pcUrl || !s.pcUrl.trim())) {
+    fallbackToast.value = 'Alamat IP PC Server belum diatur. Buka Settings untuk mengisi IP PC Server.'
+    if (engineToastTimer) clearTimeout(engineToastTimer)
+    engineToastTimer = setTimeout(() => {
+      fallbackToast.value = ''
+    }, 4000)
+    return
+  }
+
+  currentEngine.value = nextEngine
+  saveSettingsToStorage({ activeEngine: nextEngine })
+  isCurrentEngineOnline.value = null
+
+  fallbackToast.value = `Beralih ke ${nextEngine === 'pc' ? 'PC Server' : 'Laptop'}...`
+  if (engineToastTimer) clearTimeout(engineToastTimer)
+  engineToastTimer = setTimeout(() => {
+    fallbackToast.value = ''
+  }, 3500)
+
+  await fetchModels()
 }
 
 // ===== Settings =====
@@ -282,9 +368,25 @@ function closeSettings() {
   showSettings.value = false
 }
 
-function onSettingsSave() {
-  // Refresh models with new API URL
+function onSettingsSave(newSettings) {
+  updateCurrentEngine()
+  if (newSettings?.theme) {
+    document.documentElement.setAttribute('data-theme', newSettings.theme)
+  }
   fetchModels()
+}
+
+function handleImportData(data) {
+  if (data.folders && Array.isArray(data.folders)) {
+    folders.splice(0, folders.length, ...data.folders)
+  }
+  if (data.conversations && Array.isArray(data.conversations)) {
+    conversations.splice(0, conversations.length, ...data.conversations)
+    if (conversations.length > 0) {
+      activeConversationId.value = conversations[0].id
+    }
+  }
+  saveState()
 }
 
 // ===== Sidebar =====
@@ -350,10 +452,6 @@ function loadState() {
   } catch (e) {
     // ignore
   }
-
-  if (!selectedModel.value) {
-    selectedModel.value = 'qwen2.5:7b'
-  }
 }
 </script>
 
@@ -393,21 +491,51 @@ function loadState() {
 
     <!-- Main Content -->
     <main class="main-content">
+      <!-- Fallback Notification Toast -->
+      <Transition name="slide-down">
+        <div v-if="fallbackToast" class="fallback-toast-alert glass">
+          <AlertCircle :size="15" />
+          <span>{{ fallbackToast }}</span>
+          <button class="toast-dismiss-btn" @click="fallbackToast = ''">
+            <X :size="12" />
+          </button>
+        </div>
+      </Transition>
+
       <!-- Top Bar -->
       <header class="top-bar">
-        <button
-          v-if="!sidebarOpen"
-          class="toggle-sidebar-btn"
-          @click="toggleSidebar"
-          title="Open sidebar"
-          id="open-sidebar-btn"
-        >
-          <PanelLeft :size="18" />
-        </button>
-        <div class="top-bar-info">
-          <span v-if="selectedModel" class="model-badge">
-            {{ selectedModel }}
-          </span>
+        <div class="top-bar-left">
+          <button
+            v-if="!sidebarOpen"
+            class="toggle-sidebar-btn"
+            @click="toggleSidebar"
+            title="Open sidebar"
+            id="open-sidebar-btn"
+          >
+            <PanelLeft :size="18" />
+          </button>
+        </div>
+
+        <!-- Engine Indicator Badge (PC Server vs Laptop) -->
+        <div class="top-bar-right">
+          <button
+            class="engine-status-pill"
+            :class="currentEngine === 'pc' ? 'engine-status-pill--pc' : 'engine-status-pill--laptop'"
+            @click="toggleEngine"
+            :title="`Engine aktif: ${currentEngine === 'pc' ? 'PC Server' : 'Laptop'}. Klik untuk beralih ke ${currentEngine === 'pc' ? 'Laptop' : 'PC Server'}.`"
+          >
+            <span
+              class="engine-dot"
+              :class="{
+                'engine-dot--online': isCurrentEngineOnline === true,
+                'engine-dot--offline': isCurrentEngineOnline === false,
+                'engine-dot--unknown': isCurrentEngineOnline === null,
+              }"
+            ></span>
+            <Server v-if="currentEngine === 'pc'" :size="13" />
+            <Laptop v-else :size="13" />
+            <span>{{ currentEngine === 'pc' ? 'PC Server' : 'Laptop' }}</span>
+          </button>
         </div>
       </header>
 
@@ -418,14 +546,18 @@ function loadState() {
         :model-name="selectedModel"
         @send="sendMessage"
         @stop="stopGeneration"
+        @regenerate="handleRegenerate"
       />
     </main>
 
     <!-- Settings Modal -->
     <SettingsModal
       v-if="showSettings"
+      :conversations="conversations"
+      :folders="folders"
       @close="closeSettings"
       @save="onSettingsSave"
+      @import-data="handleImportData"
     />
   </div>
 </template>
@@ -449,11 +581,174 @@ function loadState() {
 .top-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--color-border);
   min-height: 48px;
   background: var(--color-bg-primary);
+  position: relative;
+  z-index: 10;
+}
+
+.top-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.engine-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.engine-status-pill:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-border-light);
+}
+
+.engine-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.engine-dot--online {
+  background: var(--color-success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.7);
+}
+
+.engine-dot--offline {
+  background: var(--color-danger);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.7);
+}
+
+.engine-dot--unknown {
+  background: var(--color-text-muted);
+}
+
+/* PC SERVER: Emerald (#10b981) / Green (#22c55e) */
+.engine-status-pill--pc {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #10b981;
+}
+
+.engine-status-pill--pc:hover {
+  background: rgba(16, 185, 129, 0.18);
+  border-color: #10b981;
+  color: #22c55e;
+  box-shadow: 0 0 14px rgba(16, 185, 129, 0.35);
+}
+
+.engine-status-pill--pc .engine-dot--online {
+  background: #00FF00;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.8), 0 0 12px rgba(34, 197, 94, 0.4);
+  animation: dotPulseEmerald 2.5s infinite ease-in-out;
+}
+
+/* LAPTOP: Cyan (#06b6d4) / Blue (#3b82f6) */
+.engine-status-pill--laptop {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.35);
+  color: #06b6d4;
+}
+
+.engine-status-pill--laptop:hover {
+  background: rgba(6, 182, 212, 0.18);
+  border-color: #06b6d4;
+  color: #3b82f6;
+  box-shadow: 0 0 14px rgba(6, 182, 212, 0.35);
+}
+
+.engine-status-pill--laptop .engine-dot--online {
+  background: #00ff00;
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.8), 0 0 12px rgba(59, 130, 246, 0.4);
+  animation: dotPulseCyan 2.5s infinite ease-in-out;
+}
+
+@keyframes dotPulseEmerald {
+  0%, 100% {
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 12px rgba(16, 185, 129, 1), 0 0 16px rgba(34, 197, 94, 0.5);
+  }
+}
+
+@keyframes dotPulseCyan {
+  0%, 100% {
+    box-shadow: 0 0 6px rgba(6, 182, 212, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 12px rgba(6, 182, 212, 1), 0 0 16px rgba(59, 130, 246, 0.5);
+  }
+}
+
+/* Fallback toast alert */
+.fallback-toast-alert {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.2);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  color: #fcd34d;
+  font-size: 0.78rem;
+  font-weight: 500;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.toast-dismiss-btn {
+  background: none;
+  border: none;
+  color: #fcd34d;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.8;
+}
+
+.toast-dismiss-btn:hover {
+  opacity: 1;
+}
+
+.slide-down-enter-active,
+.slide-down-leave-active {
+  transition: all 0.25s ease;
+}
+
+.slide-down-enter-from,
+.slide-down-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -10px);
 }
 
 .toggle-sidebar-btn {
@@ -487,7 +782,6 @@ function loadState() {
 }
 
 .top-bar-info {
-  flex: 1;
   display: flex;
   align-items: center;
 }

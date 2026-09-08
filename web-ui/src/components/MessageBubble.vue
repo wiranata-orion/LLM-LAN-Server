@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { Bot, User, Copy, Check } from 'lucide-vue-next'
+import hljs from 'highlight.js/lib/common'
 import { ref } from 'vue'
 
 const props = defineProps({
@@ -9,25 +10,52 @@ const props = defineProps({
     required: true,
     // { role: 'user' | 'assistant', content: string }
   },
+  isGenerating: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 const copied = ref(false)
 
 const isUser = computed(() => props.message.role === 'user')
 const isAssistant = computed(() => props.message.role === 'assistant')
+const isThinking = computed(() => isAssistant.value && props.isGenerating && !props.message.content)
 
 function renderMarkdown(text) {
   if (!text) return ''
 
   let html = text
-    // Escape HTML
+
+  // ---- Code blocks: extract and protect first ----
+  const codeBlocks = []
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`
+    codeBlocks.push(createCodeBlock(lang, code))
+    return placeholder
+  })
+
+  // Render an unfinished code block while the response is still streaming.
+  html = html.replace(/```(\w*)\n([\s\S]*)$/g, (_, lang, code) => {
+    const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`
+    codeBlocks.push(createCodeBlock(lang, code))
+    return placeholder
+  })
+
+  // Escape HTML (after code blocks are protected)
+  html = html
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 
-  // Code blocks (```lang\ncode\n```)
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    return `<pre><code class="language-${lang}">${code.trim()}</code></pre>`
+  // ---- LaTeX Math ----
+  // Display math: $$...$$
+  html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
+    return `<div class="math-block">${formatMath(math.trim())}</div>`
+  })
+  // Inline math: $...$
+  html = html.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+    return `<span class="math-inline">${formatMath(math.trim())}</span>`
   })
 
   // Inline code
@@ -39,6 +67,9 @@ function renderMarkdown(text) {
   // Italic
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
 
+  // Strikethrough
+  html = html.replace(/~~(.+?)~~/g, '<del>$1</del>')
+
   // Blockquotes
   html = html.replace(/^&gt;\s?(.+)$/gm, '<blockquote>$1</blockquote>')
 
@@ -48,20 +79,43 @@ function renderMarkdown(text) {
   html = html.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
   html = html.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>')
 
-  // Unordered lists
-  html = html.replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>')
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`)
-
-  // Ordered lists
-  html = html.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>')
-
   // Horizontal rule
   html = html.replace(/^---$/gm, '<hr>')
 
   // Links
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
 
-  // Paragraphs: wrap consecutive non-block lines
+  // ---- Tables ----
+  html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (tableBlock) => {
+    const rows = tableBlock.trim().split('\n').filter(r => r.trim())
+    if (rows.length < 2) return tableBlock
+    // Check if second row is a separator row (|---|---|)
+    const sepRow = rows[1]
+    if (!/^\|[\s\-:|]+\|$/.test(sepRow)) return tableBlock
+    const headerCells = rows[0].split('|').filter((c, i, a) => i > 0 && i < a.length - 1).map(c => c.trim())
+    const bodyRows = rows.slice(2)
+    let tableHtml = '<table><thead><tr>'
+    headerCells.forEach(c => { tableHtml += `<th>${c}</th>` })
+    tableHtml += '</tr></thead><tbody>'
+    bodyRows.forEach(row => {
+      const cells = row.split('|').filter((c, i, a) => i > 0 && i < a.length - 1).map(c => c.trim())
+      tableHtml += '<tr>'
+      cells.forEach(c => { tableHtml += `<td>${c}</td>` })
+      tableHtml += '</tr>'
+    })
+    tableHtml += '</tbody></table>'
+    return tableHtml
+  })
+
+  // ---- Nested lists (stack-based) ----
+  html = processLists(html)
+
+  // Restore code blocks
+  codeBlocks.forEach((block, i) => {
+    html = html.replace(`%%CODEBLOCK_${i}%%`, block)
+  })
+
+  // Paragraphs: wrap non-block lines
   html = html
     .split('\n\n')
     .map((block) => {
@@ -73,7 +127,10 @@ function renderMarkdown(text) {
         trimmed.startsWith('<ul') ||
         trimmed.startsWith('<ol') ||
         trimmed.startsWith('<blockquote') ||
-        trimmed.startsWith('<hr')
+        trimmed.startsWith('<hr') ||
+        trimmed.startsWith('<div') ||
+        trimmed.startsWith('<table') ||
+        trimmed.startsWith('%%CODEBLOCK')
       ) {
         return trimmed
       }
@@ -84,8 +141,6 @@ function renderMarkdown(text) {
   return html
 }
 
-<<<<<<< Updated upstream
-=======
 function createCodeBlock(lang, code) {
   const cleanCode = code.trim()
   const safeCode = escapeHtml(cleanCode)
@@ -117,21 +172,20 @@ function processLists(html) {
   while (i < lines.length) {
     const line = lines[i]
     // Check if this line is a list item (ordered or unordered)
-    const olMatch = line.match(/^(\s*)(\d+)\.\s+(.*)/)
+    const olMatch = line.match(/^(\s*)\d+\.\s+(.*)/)
     const ulMatch = line.match(/^(\s*)[-*]\s+(.*)/)
 
     if (olMatch || ulMatch) {
       // Collect all consecutive list lines
       const listLines = []
       while (i < lines.length) {
-        const lo = lines[i].match(/^(\s*)(\d+)\.\s+(.*)/)
+        const lo = lines[i].match(/^(\s*)\d+\.\s+(.*)/)
         const lu = lines[i].match(/^(\s*)[-*]\s+(.*)/)
         if (lo || lu) {
           const indent = (lo ? lo[1] : lu[1]).length
-          const content = lo ? lo[3] : lu[2]
+          const content = lo ? lo[2] : lu[2]
           const type = lo ? 'ol' : 'ul'
-          const number = lo ? Number(lo[2]) : null
-          listLines.push({ indent, content, type, number })
+          listLines.push({ indent, content, type })
           i++
         } else if (!lines[i].trim() && i + 1 < lines.length) {
           const nextIsList = /^(\s*)(?:\d+\.|[-*])\s+/.test(lines[i + 1])
@@ -173,17 +227,17 @@ function buildNestedList(items) {
       if (stack[stack.length - 1].type !== type) {
         const popped = stack.pop()
         html += `</li></${popped.type}>`
-        html += `<${type}><li${listItemValue(item)}>${item.content}`
+        html += `<${type}><li>${item.content}`
         stack.push({ type, indent: item.indent })
       } else {
-        html += `</li><li${listItemValue(item)}>${item.content}`
+        html += `</li><li>${item.content}`
       }
     } else {
       while (stack.length < level) {
         html += `<ol><li>`
         stack.push({ type: 'ol', indent: 0 })
       }
-      html += `<${type}><li${listItemValue(item)}>${item.content}`
+      html += `<${type}><li>${item.content}`
       stack.push({ type, indent: item.indent })
     }
   }
@@ -194,12 +248,6 @@ function buildNestedList(items) {
   }
 
   return html
-}
-
-function listItemValue(item) {
-  return item.type === 'ol' && Number.isInteger(item.number)
-    ? ` value="${item.number}"`
-    : ''
 }
 
 // ---- LaTeX math formatter ----
@@ -276,7 +324,6 @@ function formatMath(latex) {
   return result
 }
 
->>>>>>> Stashed changes
 async function copyContent() {
   try {
     await navigator.clipboard.writeText(props.message.content)
@@ -288,6 +335,19 @@ async function copyContent() {
     console.error('Copy failed:', err)
   }
 }
+
+// Copy code block content
+async function copyCode(code) {
+  try {
+    await navigator.clipboard.writeText(code)
+    // optional visual feedback could be added here
+    console.log('Code copied')
+  } catch (err) {
+    console.error('Copy code failed:', err)
+  }
+}
+
+window.copyCode = copyCode
 </script>
 
 <template>
@@ -303,43 +363,46 @@ async function copyContent() {
 
     <!-- Content -->
     <div class="message-content-wrapper">
-      <span class="message-role">{{ isUser ? 'You' : 'AI' }}</span>
+      <span class="message-role">{{ isUser ? 'You' : 'Xufruz' }}</span>
 
       <div v-if="isUser" class="message-bubble message-bubble--user">
         {{ message.content }}
       </div>
 
+      <div v-if="isThinking" class="thinking-indicator" aria-label="Thinking">
+        <span>Thinking</span><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      </div>
+
       <div
-        v-else
+        v-else-if="isAssistant"
         class="message-bubble message-bubble--assistant markdown-body"
         v-html="renderMarkdown(message.content)"
       ></div>
 
       <!-- Actions (AI only) -->
-      <div v-if="isAssistant && message.content" class="message-actions">
-        <button
-          class="action-btn"
-          @click="copyContent"
-          :title="copied ? 'Copied!' : 'Copy response'"
-        >
-          <Check v-if="copied" :size="14" />
-          <Copy v-else :size="14" />
-          <span>{{ copied ? 'Copied' : 'Copy' }}</span>
-        </button>
-      </div>
+
     </div>
   </div>
 </template>
 
-<style scoped>
+<style>
 .message-row {
   display: flex;
   gap: 12px;
   padding: 20px 24px;
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
   width: 100%;
   animation: fadeSlideIn 0.3s ease;
+}
+
+/* Separator line only after assistant (AI) messages */
+.message-row--assistant {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.message-row--assistant:last-child {
+  border-bottom: none;
 }
 
 @keyframes fadeSlideIn {
@@ -403,6 +466,47 @@ async function copyContent() {
   color: var(--color-ai-bubble-text);
 }
 
+.thinking-indicator {
+  display: inline-flex;
+  align-items: baseline;
+  color: var(--color-text-muted);
+  font-size: 0.925rem;
+  line-height: 1.7;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 3px;
+}
+
+.thinking-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinkingPulse 1.2s infinite ease-in-out;
+}
+
+.thinking-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes thinkingPulse {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
 .message-actions {
   display: flex;
   gap: 8px;
@@ -435,4 +539,257 @@ async function copyContent() {
   border-color: var(--color-border-light);
   background: var(--color-bg-hover);
 }
+
+/* ===== Code block card ===== */
+.code-card {
+  background: var(--color-bg-secondary);
+  border-radius: 8px;
+  margin: 12px 0;
+  overflow: hidden;
+  box-shadow: 0 2px 6px var(--color-shadow);
+}
+
+.code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--color-bg-tertiary);
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.code-lang {
+  font-family: var(--font-mono);
+}
+
+.copy-code-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 2px 6px;
+}
+
+.copy-code-btn:hover {
+  color: var(--color-text-primary);
+}
+
+/* Syntax highlighting tokens */
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-literal,
+.markdown-body .hljs-type {
+  color: #c084fc;
+}
+
+.markdown-body .hljs-string,
+.markdown-body .hljs-title,
+.markdown-body .hljs-section,
+.markdown-body .hljs-attribute {
+  color: #86efac;
+}
+
+.markdown-body .hljs-number,
+.markdown-body .hljs-variable,
+.markdown-body .hljs-template-variable {
+  color: #fbbf24;
+}
+
+.markdown-body .hljs-comment,
+.markdown-body .hljs-quote {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.markdown-body .hljs-built_in,
+.markdown-body .hljs-symbol,
+.markdown-body .hljs-bullet {
+  color: #67e8f9;
+}
+
+/* ===== List styling (nested) ===== */
+.markdown-body ol,
+.markdown-body ul {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body li {
+  margin: 0.2em 0;
+  padding-left: 0.2em;
+}
+
+/* Nested list indentation */
+.markdown-body ol ol,
+.markdown-body ul ol,
+.markdown-body ol ul,
+.markdown-body ul ul {
+  margin: 0.2em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-body ol ol {
+  list-style-type: lower-alpha;
+}
+
+.markdown-body ol ol ol {
+  list-style-type: lower-roman;
+}
+
+.markdown-body ul ul {
+  list-style-type: circle;
+}
+
+.markdown-body ul ul ul {
+  list-style-type: square;
+}
+
+/* ===== Math formula styling ===== */
+.math-block {
+  display: block;
+  text-align: center;
+  padding: 16px 20px;
+  margin: 12px 0;
+  background: var(--color-bg-tertiary);
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  font-size: 1.1em;
+  font-family: 'Cambria Math', 'Latin Modern Math', 'STIX Two Math', Georgia, serif;
+  letter-spacing: 0.02em;
+  overflow-x: auto;
+}
+
+.math-inline {
+  font-family: 'Cambria Math', 'Latin Modern Math', 'STIX Two Math', Georgia, serif;
+  font-style: italic;
+  padding: 1px 4px;
+  background: rgba(139, 92, 246, 0.08);
+  border-radius: 4px;
+  font-size: 0.95em;
+}
+
+.math-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0 4px;
+}
+
+.math-num {
+  border-bottom: 1.5px solid currentColor;
+  padding: 0 4px 2px;
+  line-height: 1.3;
+}
+
+.math-den {
+  padding: 2px 4px 0;
+  line-height: 1.3;
+}
+
+.math-text {
+  font-style: normal;
+  font-family: var(--font-sans);
+}
+
+/* ===== Table styling ===== */
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  font-size: 0.88rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--color-border);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: var(--color-bg-tertiary);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.markdown-body td {
+  color: var(--color-text-secondary);
+}
+
+.markdown-body tr:hover td {
+  background: var(--color-bg-hover);
+}
+
+/* ===== Blockquote styling ===== */
+.markdown-body blockquote {
+  border-left: 3px solid var(--color-accent);
+  margin: 8px 0;
+  padding: 4px 16px;
+  color: var(--color-text-secondary);
+  background: rgba(139, 92, 246, 0.05);
+  border-radius: 0 6px 6px 0;
+}
+
+/* ===== Heading styling ===== */
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 16px 0 8px;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}
+
+.markdown-body h1 { font-size: 1.4em; }
+.markdown-body h2 { font-size: 1.2em; }
+.markdown-body h3 { font-size: 1.05em; }
+.markdown-body h4 { font-size: 0.95em; }
+
+/* ===== Inline code ===== */
+.markdown-body code {
+  background: var(--color-bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+/* ===== Horizontal rule ===== */
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 16px 0;
+}
+
+/* ===== Links ===== */
+.markdown-body a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+/* ===== Strikethrough ===== */
+.markdown-body del {
+  opacity: 0.6;
+}
+
+/* ===== Paragraphs ===== */
+.markdown-body p {
+  margin: 0.5em 0;
+}
 </style>
+
