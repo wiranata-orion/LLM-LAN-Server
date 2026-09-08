@@ -955,12 +955,6 @@ function resetDefaults() {
                   <Folder :size="14" />
                   <span>{{ selectedStorageDir ? 'Ganti Folder' : 'Pilih Folder (Laptop / Flashdisk)' }}</span>
                 </button>
-
-                <!-- Only shown if folder has been selected! -->
-                <button v-if="selectedStorageDir" class="btn btn--primary" @click="syncAllToDirectory">
-                  <Save :size="14" />
-                  <span>Simpan Ingatan</span>
-                </button>
               </div>
             </div>
 

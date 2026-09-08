@@ -172,20 +172,21 @@ function processLists(html) {
   while (i < lines.length) {
     const line = lines[i]
     // Check if this line is a list item (ordered or unordered)
-    const olMatch = line.match(/^(\s*)\d+\.\s+(.*)/)
+    const olMatch = line.match(/^(\s*)(\d+)\.\s+(.*)/)
     const ulMatch = line.match(/^(\s*)[-*]\s+(.*)/)
 
     if (olMatch || ulMatch) {
       // Collect all consecutive list lines
       const listLines = []
       while (i < lines.length) {
-        const lo = lines[i].match(/^(\s*)\d+\.\s+(.*)/)
+        const lo = lines[i].match(/^(\s*)(\d+)\.\s+(.*)/)
         const lu = lines[i].match(/^(\s*)[-*]\s+(.*)/)
         if (lo || lu) {
           const indent = (lo ? lo[1] : lu[1]).length
-          const content = lo ? lo[2] : lu[2]
+          const content = lo ? lo[3] : lu[2]
           const type = lo ? 'ol' : 'ul'
-          listLines.push({ indent, content, type })
+          const number = lo ? Number(lo[2]) : null
+          listLines.push({ indent, content, type, number })
           i++
         } else if (!lines[i].trim() && i + 1 < lines.length) {
           const nextIsList = /^(\s*)(?:\d+\.|[-*])\s+/.test(lines[i + 1])
@@ -227,17 +228,17 @@ function buildNestedList(items) {
       if (stack[stack.length - 1].type !== type) {
         const popped = stack.pop()
         html += `</li></${popped.type}>`
-        html += `<${type}><li>${item.content}`
+        html += `<${type}><li${listItemValue(item)}>${item.content}`
         stack.push({ type, indent: item.indent })
       } else {
-        html += `</li><li>${item.content}`
+        html += `</li><li${listItemValue(item)}>${item.content}`
       }
     } else {
       while (stack.length < level) {
         html += `<ol><li>`
         stack.push({ type: 'ol', indent: 0 })
       }
-      html += `<${type}><li>${item.content}`
+      html += `<${type}><li${listItemValue(item)}>${item.content}`
       stack.push({ type, indent: item.indent })
     }
   }
@@ -248,6 +249,12 @@ function buildNestedList(items) {
   }
 
   return html
+}
+
+function listItemValue(item) {
+  return item.type === 'ol' && Number.isInteger(item.number)
+    ? ` value="${item.number}"`
+    : ''
 }
 
 // ---- LaTeX math formatter ----
