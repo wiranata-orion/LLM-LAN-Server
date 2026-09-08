@@ -919,7 +919,7 @@ function getFolderDisplayName(f) {
 
 .btn-micro--confirm {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent, white);
 }
 
 .btn-micro--confirm:hover {

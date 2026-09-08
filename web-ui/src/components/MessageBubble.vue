@@ -450,7 +450,7 @@ window.copyCode = copyCode
 
 .message-avatar--user {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent, white);
   border-color: var(--color-accent);
 }
 
@@ -691,7 +691,7 @@ window.copyCode = copyCode
   font-family: 'Cambria Math', 'Latin Modern Math', 'STIX Two Math', Georgia, serif;
   font-style: italic;
   padding: 1px 4px;
-  background: rgba(139, 92, 246, 0.08);
+  background: var(--color-accent-subtle);
   border-radius: 4px;
   font-size: 0.95em;
 }
@@ -755,7 +755,7 @@ window.copyCode = copyCode
   margin: 8px 0;
   padding: 4px 16px;
   color: var(--color-text-secondary);
-  background: rgba(139, 92, 246, 0.05);
+  background: var(--color-accent-subtle);
   border-radius: 0 6px 6px 0;
 }
 

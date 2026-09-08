@@ -4,7 +4,7 @@ import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
-import { getModels, getSettings, saveSettingsToStorage } from './services/api.js'
+import { getModels, getSettings, saveSettingsToStorage, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
 import { sendMessageStream as sendAgentMessageStream } from './services/api.ts'
 import {
   loadStoredConversations,
@@ -12,6 +12,9 @@ import {
   loadStoredFolders,
   saveConversation,
   saveStoredFolders,
+  restoreMemoryDirectoryHandle,
+  setMemoryDirectoryHandle,
+  requestMemoryDirectoryPermission,
 } from './services/memory.js'
 
 // ===== State =====
@@ -56,10 +59,16 @@ function handleEngineFallback(e) {
 
 // ===== Lifecycle =====
 onMounted(async () => {
+  const restoredDirectoryHandle = await restoreMemoryDirectoryHandle()
+  if (restoredDirectoryHandle) {
+    setMemoryDirectoryHandle(restoredDirectoryHandle)
+  }
+
   // Load saved state
   loadState({
-    includeConversations: !getSettings().storageDirName,
-    includeFolders: !getSettings().storageDirName,
+    // Keep the last known sidebar visible while physical storage permission is restored.
+    includeConversations: true,
+    includeFolders: true,
   })
 
   // Apply saved theme & engine
@@ -67,6 +76,8 @@ onMounted(async () => {
   if (s.theme) {
     document.documentElement.setAttribute('data-theme', s.theme)
   }
+  if (s.theme === 'custom') applyCustomTheme(s.customTheme)
+  else clearCustomThemeContrast()
   updateCurrentEngine()
   window.addEventListener('engine-fallback', handleEngineFallback)
 
@@ -397,8 +408,12 @@ async function toggleEngine() {
 }
 
 // ===== Settings =====
-function openSettings() {
+async function openSettings() {
   showSettings.value = true
+  const settings = getSettings()
+  if (settings.storageDirName && await requestMemoryDirectoryPermission()) {
+    await loadSelectedDirectoryState()
+  }
 }
 
 function closeSettings() {
@@ -410,19 +425,9 @@ async function onSettingsSave(newSettings) {
   if (newSettings?.theme) {
     document.documentElement.setAttribute('data-theme', newSettings.theme)
   }
+  if (newSettings?.theme === 'custom') applyCustomTheme(newSettings.customTheme)
+  else clearCustomThemeContrast()
   await fetchModels()
-  if (newSettings?.storageDirName) {
-    let storedConversations = []
-    try {
-      storedConversations = await loadStoredConversations(selectedModel.value, {
-        requireConnection: false,
-      }) || []
-    } catch (error) {
-      console.error('Failed to load conversations from the selected folder:', error)
-    }
-    conversations.splice(0, conversations.length, ...storedConversations)
-    activeConversationId.value = conversations[0]?.id || null
-  }
 }
 
 async function onFolderChanged() {
@@ -430,18 +435,22 @@ async function onFolderChanged() {
 }
 
 async function loadSelectedDirectoryState() {
-  conversations.splice(0, conversations.length)
-  folders.splice(0, folders.length)
-  activeConversationId.value = null
+  const previousActiveId = activeConversationId.value
 
   try {
     const [storedConversations, storedFolders] = await Promise.all([
       loadStoredConversations(selectedModel.value, { requireConnection: false }),
       loadStoredFolders(selectedModel.value),
     ])
+
+    if (!storedConversations || !storedFolders) return
+
     conversations.splice(0, conversations.length, ...(storedConversations || []))
     folders.splice(0, folders.length, ...(storedFolders || []))
-    activeConversationId.value = conversations[0]?.id || null
+    activeConversationId.value = conversations.some((conversation) => conversation.id === previousActiveId)
+      ? previousActiveId
+      : conversations[0]?.id || null
+    saveState()
   } catch (error) {
     console.error('Failed to load conversations after folder change:', error)
   }
@@ -868,7 +877,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
   background: var(--color-accent-subtle);
   padding: 4px 12px;
   border-radius: 20px;
-  border: 1px solid rgba(139, 92, 246, 0.2);
+  border: 1px solid var(--color-accent-subtle);
 }
 
 .sidebar-overlay {

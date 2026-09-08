@@ -8,16 +8,79 @@ let selectedDirectoryHandle = null
 let selectedDirectoryName = ''
 let cachedGlobalMemory = null
 
+const DIRECTORY_HANDLE_DB = 'xufruz-memory'
+const DIRECTORY_HANDLE_STORE = 'directory-handles'
+const DIRECTORY_HANDLE_KEY = 'selected-directory'
+
+function openDirectoryHandleDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DIRECTORY_HANDLE_DB, 1)
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(DIRECTORY_HANDLE_STORE)
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+async function persistDirectoryHandle(handle) {
+  if (!('indexedDB' in window)) return
+  try {
+    const database = await openDirectoryHandleDb()
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(DIRECTORY_HANDLE_STORE, 'readwrite')
+      transaction.objectStore(DIRECTORY_HANDLE_STORE).put(handle, DIRECTORY_HANDLE_KEY)
+      transaction.oncomplete = resolve
+      transaction.onerror = () => reject(transaction.error)
+    })
+    database.close()
+  } catch (error) {
+    console.warn('Memory folder handle could not be persisted:', error)
+  }
+}
+
+export async function restoreMemoryDirectoryHandle() {
+  if (!('indexedDB' in window)) return null
+  try {
+    const database = await openDirectoryHandleDb()
+    const handle = await new Promise((resolve, reject) => {
+      const transaction = database.transaction(DIRECTORY_HANDLE_STORE, 'readonly')
+      const request = transaction.objectStore(DIRECTORY_HANDLE_STORE).get(DIRECTORY_HANDLE_KEY)
+      request.onsuccess = () => resolve(request.result || null)
+      request.onerror = () => reject(request.error)
+    })
+    database.close()
+    return handle
+  } catch (error) {
+    console.warn('Memory folder handle could not be restored:', error)
+    return null
+  }
+}
+
 export function setMemoryDirectoryHandle(handle) {
   if (selectedDirectoryHandle !== handle) {
     cachedGlobalMemory = null
   }
   selectedDirectoryHandle = handle || null
   selectedDirectoryName = handle?.name || ''
+  if (handle) persistDirectoryHandle(handle)
 }
 
 export function getMemoryDirectoryName() {
   return selectedDirectoryName
+}
+
+export async function requestMemoryDirectoryPermission() {
+  if (!selectedDirectoryHandle) return false
+  try {
+    const permission = typeof selectedDirectoryHandle.requestPermission === 'function'
+      ? await selectedDirectoryHandle.requestPermission({ mode: 'readwrite' })
+      : 'granted'
+    return permission === 'granted'
+  } catch (error) {
+    console.warn('Memory folder permission could not be restored:', error)
+    return false
+  }
 }
 
 export async function getMemoryStatus(model) {

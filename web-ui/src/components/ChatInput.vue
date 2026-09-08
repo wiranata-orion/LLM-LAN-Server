@@ -126,7 +126,7 @@ defineExpose({ focusInput })
 }
 
 .chat-input-wrapper:focus-within {
-  box-shadow: 0 0 24px var(--color-accent-glow), 0 0 80px rgba(139, 92, 246, 0.1);
+  box-shadow: 0 0 24px var(--color-accent-glow), 0 0 80px var(--color-accent-subtle);
   border-color: var(--color-accent) !important;
 }
 
@@ -192,7 +192,7 @@ defineExpose({ focusInput })
 
 .send-btn--active {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent, white);
   box-shadow: 0 0 16px var(--color-accent-glow);
 }
 
@@ -203,7 +203,7 @@ defineExpose({ focusInput })
 
 .stop-btn {
   background: var(--color-danger);
-  color: white;
+  color: var(--color-on-accent, white);
   animation: pulse 1.5s infinite;
 }
 

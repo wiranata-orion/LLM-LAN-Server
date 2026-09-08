@@ -23,6 +23,8 @@ import {
   saveSettingsToStorage,
   checkEnginePing,
   DEFAULT_SETTINGS,
+  applyCustomTheme,
+  clearCustomThemeContrast,
 } from '../services/api.js'
 import { setMemoryDirectoryHandle } from '../services/memory.js'
 
@@ -49,6 +51,10 @@ const laptopUrl = ref('http://localhost:11434')
 const autoFallback = ref(true)
 const theme = ref('xufruz')
 const initialTheme = ref('xufruz')
+const customTheme = ref({ ...DEFAULT_SETTINGS.customTheme })
+const initialCustomTheme = ref({ ...DEFAULT_SETTINGS.customTheme })
+const showCustomThemePopup = ref(false)
+let didSaveSettings = false
 // Hardware-tailored num_ctx states:
 // Laptop (Local) -> default 2048
 const numCtxLaptop = ref(2048)
@@ -101,8 +107,12 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown)
-  // Pastikan tema kembali ke initialTheme jika modal ditutup tanpa disimpan
-  document.documentElement.setAttribute('data-theme', initialTheme.value)
+  // Only discard live preview changes when Settings was closed without saving.
+  if (!didSaveSettings) {
+    document.documentElement.setAttribute('data-theme', initialTheme.value)
+    if (initialTheme.value === 'custom') applyCustomTheme(initialCustomTheme.value)
+    else clearCustomThemeContrast()
+  }
 })
 
 function loadCurrentSettings() {
@@ -113,6 +123,10 @@ function loadCurrentSettings() {
   autoFallback.value = s.autoFallback !== false
   theme.value = s.theme || 'xufruz'
   initialTheme.value = s.theme || 'xufruz'
+  customTheme.value = { ...DEFAULT_SETTINGS.customTheme, ...(s.customTheme || {}) }
+  initialCustomTheme.value = { ...customTheme.value }
+  if (theme.value === 'custom') applyCustomTheme(customTheme.value)
+  else clearCustomThemeContrast()
   temperature.value = s.temperature !== undefined && s.temperature !== '' ? Number(s.temperature) : 0.7
   maxTokens.value = s.maxTokens ?? ''
   selectedStorageDir.value = s.storageDirName || ''
@@ -270,6 +284,7 @@ const themesList = [
     desc: 'Deep violet sleek neon',
     bg: '#0a0a12',
     accent: '#8b5cf6',
+    text: '#e4e4ed',
   },
   {
     id: 'cyberpunk',
@@ -277,6 +292,7 @@ const themesList = [
     desc: 'Matrix high-tech teal',
     bg: '#06110f',
     accent: '#10b981',
+    text: '#e2f5ee',
   },
   {
     id: 'oled',
@@ -284,6 +300,7 @@ const themesList = [
     desc: 'True pure black #000000',
     bg: '#000000',
     accent: '#3b82f6',
+    text: '#f3f4f6',
   },
   {
     id: 'light',
@@ -291,6 +308,7 @@ const themesList = [
     desc: 'Nuansa putih terang & jernih',
     bg: '#f8fafc',
     accent: '#4f46e5',
+    text: '#0f172a',
   },
   {
     id: 'grey',
@@ -298,20 +316,45 @@ const themesList = [
     desc: 'Abu-abu modern & fokus tinggi',
     bg: '#18191c',
     accent: '#64748b',
+    text: '#f3f4f6',
   },
   {
-    id: 'dark',
-    name: 'Midnight Dark',
-    desc: 'Gelap pekat kontras tajam',
-    bg: '#0b0f19',
-    accent: '#0ea5e9',
+    id: 'custom',
+    name: 'Custom Theme',
+    desc: 'Atur tiga warna sesuai selera',
+    bg: '#10131a',
+    accent: '#22c55e',
+    text: '#f3f4f6',
   },
 ]
 
 function selectTheme(tId) {
   theme.value = tId
+  if (tId === 'custom') applyCustomTheme(customTheme.value)
+  else clearCustomThemeContrast()
   // Berikan live preview sementara langsung ke tampilan
   document.documentElement.setAttribute('data-theme', tId)
+  if (tId === 'custom') showCustomThemePopup.value = true
+}
+
+function getThemeCardStyle(themeOption) {
+  const isCustom = themeOption.id === 'custom'
+  const colors = isCustom
+    ? customTheme.value
+    : themeOption
+
+  return {
+    '--theme-card-bg': colors.background || colors.bg,
+    '--theme-card-accent': colors.accent,
+    '--theme-card-text': isCustom ? 'var(--custom-readable-text, var(--custom-text))' : colors.text,
+    background: colors.background || colors.bg,
+    borderColor: colors.accent,
+  }
+}
+
+function updateCustomColor(name, value) {
+  customTheme.value = { ...customTheme.value, [name]: value }
+  if (theme.value === 'custom') applyCustomTheme(customTheme.value)
 }
 
 // ===== Storage Directory (.json) =====
@@ -435,6 +478,7 @@ function saveSettings() {
     laptopUrl: laptopUrl.value.trim(),
     autoFallback: autoFallback.value,
     theme: theme.value,
+    customTheme: { ...customTheme.value },
     numCtx: activeFinalCtx,
     numCtxLaptop: finalLaptopCtx,
     numCtxPc: finalPcCtx,
@@ -444,9 +488,13 @@ function saveSettings() {
   }
 
   saveSettingsToStorage(settings)
+  didSaveSettings = true
   // Simpan tema secara permanen
   initialTheme.value = theme.value
+  initialCustomTheme.value = { ...customTheme.value }
   document.documentElement.setAttribute('data-theme', theme.value)
+  if (theme.value === 'custom') applyCustomTheme(customTheme.value)
+  else clearCustomThemeContrast()
   emit('save', settings)
   emit('close')
 }
@@ -459,6 +507,8 @@ function resetDefaults() {
   const defaultTheme = DEFAULT_SETTINGS.theme || 'xufruz'
   theme.value = defaultTheme
   document.documentElement.setAttribute('data-theme', defaultTheme)
+  customTheme.value = { ...DEFAULT_SETTINGS.customTheme }
+  clearCustomThemeContrast()
   numCtxLaptop.value = DEFAULT_SETTINGS.numCtxLaptop || 2048
   customNumCtxLaptop.value = ''
   numCtxPc.value = DEFAULT_SETTINGS.numCtxPc || 4096
@@ -695,7 +745,7 @@ function resetDefaults() {
             </div>
 
             <!-- Context Window (num_ctx) -->
-            <div class="form-group">
+            <div class="form-group context-window-card">
               <div class="label-with-badge">
                 <label class="form-label">
                   Context Window (num_ctx) &bull;
@@ -924,11 +974,26 @@ function resetDefaults() {
                 :key="t.id"
                 class="theme-card"
                 :class="{ 'theme-card--active': theme === t.id }"
+                :style="getThemeCardStyle(t)"
                 @click="selectTheme(t.id)"
               >
-                <div class="theme-swatch-box" :style="{ background: t.bg }">
-                  <div class="theme-accent-pill" :style="{ background: t.accent }"></div>
-                  <div class="theme-sub-pill" :style="{ background: t.accent, opacity: 0.25 }"></div>
+                <div
+                  class="theme-swatch-box"
+                  :style="{
+                    background: t.id === 'custom'
+                      ? `linear-gradient(135deg, ${customTheme.background} 0 45%, ${customTheme.accent} 45% 72%, ${customTheme.text} 72% 100%)`
+                      : t.bg,
+                  }"
+                >
+                  <template v-if="t.id === 'custom'">
+                    <div class="theme-custom-color-chip" :style="{ background: customTheme.background }"></div>
+                    <div class="theme-custom-color-chip" :style="{ background: customTheme.accent }"></div>
+                    <div class="theme-custom-color-chip" :style="{ background: customTheme.text }"></div>
+                  </template>
+                  <template v-else>
+                    <div class="theme-accent-pill" :style="{ background: t.accent }"></div>
+                    <div class="theme-sub-pill" :style="{ background: t.accent, opacity: 0.25 }"></div>
+                  </template>
                 </div>
                 <div class="theme-info">
                   <div class="theme-name-row">
@@ -939,6 +1004,7 @@ function resetDefaults() {
                 </div>
               </div>
             </div>
+
           </div>
 
           <!-- TAB 4: PENYIMPANAN / MEMORY (.json) -->
@@ -963,7 +1029,7 @@ function resetDefaults() {
               </div>
 
               <div class="storage-actions-row">
-                <button class="btn btn--secondary" @click="pickPhysicalFolder">
+                <button class="btn btn--secondary memory-folder-button" @click="pickPhysicalFolder">
                   <Folder :size="14" />
                   <span>{{ selectedStorageDir ? 'Ganti Folder' : 'Pilih Folder (Laptop / Flashdisk)' }}</span>
                 </button>
@@ -1010,6 +1076,43 @@ function resetDefaults() {
             Simpan Perubahan
           </button>
         </div>
+
+        <Transition name="modal-backdrop">
+          <div v-if="showCustomThemePopup" class="custom-theme-backdrop" @click.self="showCustomThemePopup = false">
+            <div class="custom-theme-popup glass" role="dialog" aria-modal="true" aria-labelledby="custom-theme-title">
+              <div class="custom-theme-popup__header">
+                <div>
+                  <h3 id="custom-theme-title">Custom Theme</h3>
+                  <p>Pilih tiga warna utama untuk tampilan aplikasi.</p>
+                </div>
+                <button class="close-btn" @click="showCustomThemePopup = false" title="Tutup">
+                  <X :size="18" />
+                </button>
+              </div>
+              <div class="custom-color-grid">
+                <label class="custom-color-control">
+                  <span>Background</span>
+                  <input :value="customTheme.background" type="color" @input="updateCustomColor('background', $event.target.value)" />
+                  <code>{{ customTheme.background }}</code>
+                </label>
+                <label class="custom-color-control">
+                  <span>Accent</span>
+                  <input :value="customTheme.accent" type="color" @input="updateCustomColor('accent', $event.target.value)" />
+                  <code>{{ customTheme.accent }}</code>
+                </label>
+                <label class="custom-color-control">
+                  <span>Text</span>
+                  <input :value="customTheme.text" type="color" @input="updateCustomColor('text', $event.target.value)" />
+                  <code>{{ customTheme.text }}</code>
+                </label>
+              </div>
+              <button class="btn btn--primary custom-theme-popup__done" @click="showCustomThemePopup = false">
+                <Check :size="14" />
+                Selesai
+              </button>
+            </div>
+          </div>
+        </Transition>
       </div>
     </div>
   </Transition>
@@ -1185,6 +1288,7 @@ function resetDefaults() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  position: relative;
 }
 
 .engine-card:hover {
@@ -1194,8 +1298,25 @@ function resetDefaults() {
 
 .engine-card--active {
   border-color: var(--color-accent) !important;
-  background: var(--color-accent-subtle) !important;
-  box-shadow: 0 0 16px var(--color-accent-glow);
+  background: color-mix(in srgb, var(--color-accent) 32%, var(--color-bg-tertiary)) !important;
+  box-shadow: 0 0 0 1px var(--color-accent), 0 0 22px var(--color-accent-glow);
+  transform: translateY(-2px);
+}
+
+.engine-card--active::before {
+  content: '';
+  position: absolute;
+  inset: 8px auto 8px 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--color-accent);
+  box-shadow: 0 0 12px var(--color-accent-glow);
+}
+
+.engine-card--active .engine-icon-wrapper {
+  background: var(--color-accent);
+  color: var(--color-on-accent, white);
+  border-color: var(--color-accent);
 }
 
 .engine-card-top {
@@ -1243,7 +1364,7 @@ function resetDefaults() {
 
 .engine-badge--active {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent, white);
 }
 
 .engine-role {
@@ -1464,7 +1585,7 @@ input:checked + .slider:before {
 .chip-info--highlight {
   background: var(--color-accent-subtle);
   color: var(--color-text-accent);
-  border-color: rgba(139, 92, 246, 0.3);
+  border-color: var(--color-accent);
 }
 
 .form-hint {
@@ -1472,6 +1593,30 @@ input:checked + .slider:before {
   color: var(--color-text-muted);
   margin: 0;
   line-height: 1.4;
+}
+
+.context-window-card {
+  padding: 16px;
+  border: 1px solid var(--color-accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-bg-secondary));
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.context-window-card .form-label,
+.context-window-card .active-gpu-label,
+.context-window-card .form-hint {
+  color: var(--color-on-bg, var(--color-text-primary));
+}
+
+.context-window-card .active-gpu-label {
+  font-weight: 700;
+}
+
+.context-window-card .chip-info {
+  background: var(--color-bg-tertiary);
+  color: var(--color-on-bg, var(--color-text-primary));
+  border-color: var(--color-accent);
 }
 
 .form-input {
@@ -1511,8 +1656,8 @@ input:checked + .slider:before {
   justify-content: center;
   padding: 8px 6px;
   border-radius: 8px;
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -1523,27 +1668,27 @@ input:checked + .slider:before {
 }
 
 .chip-btn--active {
-  background: var(--color-accent-subtle) !important;
+  background: color-mix(in srgb, var(--color-accent) 28%, var(--color-bg-tertiary)) !important;
   border-color: var(--color-accent) !important;
 }
 
 .chip-main {
   font-size: 0.78rem;
   font-weight: 600;
-  color: var(--color-text-primary);
+  color: var(--color-on-bg, var(--color-text-primary));
 }
 
 .chip-sub {
   font-size: 0.65rem;
-  color: var(--color-text-muted);
+  color: var(--color-on-bg, var(--color-text-secondary));
 }
 
 .chip-btn--active .chip-main {
-  color: var(--color-text-accent);
+  color: var(--color-on-bg, var(--color-text-primary));
 }
 
 .chip-sub--star {
-  color: #eab308 !important;
+  color: var(--color-on-bg, var(--color-text-primary)) !important;
   font-weight: 600;
 }
 
@@ -1560,33 +1705,33 @@ input:checked + .slider:before {
   padding: 8px 12px;
   border-radius: 10px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
+  background: color-mix(in srgb, var(--color-accent) 18%, var(--color-bg-tertiary));
   font-size: 0.76rem;
   margin-bottom: 14px;
 }
 
 .badge-bar--laptop {
-  border-color: rgba(6, 182, 212, 0.35);
-  background: rgba(6, 182, 212, 0.08);
-  color: #06b6d4;
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 28%, var(--color-bg-tertiary));
+  color: var(--color-on-bg, var(--color-text-primary));
 }
 
 .badge-bar--laptop strong {
-  color: #06b6d4;
+  color: var(--color-on-bg, var(--color-text-primary));
 }
 
 .badge-bar--pc {
-  border-color: rgba(16, 185, 129, 0.35);
-  background: rgba(16, 185, 129, 0.08);
-  color: #10b981;
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 28%, var(--color-bg-tertiary));
+  color: var(--color-on-bg, var(--color-text-primary));
 }
 
 .badge-bar--pc strong {
-  color: #10b981;
+  color: var(--color-on-bg, var(--color-text-primary));
 }
 
 .badge-bar-text {
-  color: var(--color-text-secondary);
+  color: var(--color-on-bg, var(--color-text-primary));
 }
 
 /* VRAM Estimate Status Box */
@@ -1640,42 +1785,42 @@ input:checked + .slider:before {
 
 /* VRAM Status Colors */
 .vram--safe {
-  border-color: rgba(6, 182, 212, 0.35);
-  background: rgba(6, 182, 212, 0.05);
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 24%, var(--color-bg-tertiary));
 }
 .vram--safe .vram-dot {
-  background: #06b6d4;
-  box-shadow: 0 0 6px rgba(6, 182, 212, 0.7);
+  background: var(--color-accent);
+  box-shadow: 0 0 6px var(--color-accent-glow);
 }
 .vram--safe .vram-usage-badge {
-  background: rgba(6, 182, 212, 0.15);
-  color: #06b6d4;
+  background: var(--color-accent);
+  color: var(--color-on-accent, white);
 }
 
 .vram--optimal {
-  border-color: rgba(34, 197, 94, 0.35);
-  background: rgba(34, 197, 94, 0.05);
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 24%, var(--color-bg-tertiary));
 }
 .vram--optimal .vram-dot {
-  background: #22c55e;
-  box-shadow: 0 0 6px rgba(34, 197, 94, 0.7);
+  background: var(--color-accent);
+  box-shadow: 0 0 6px var(--color-accent-glow);
 }
 .vram--optimal .vram-usage-badge {
-  background: rgba(34, 197, 94, 0.15);
-  color: #22c55e;
+  background: var(--color-accent);
+  color: var(--color-on-accent, white);
 }
 
 .vram--good {
-  border-color: rgba(59, 130, 246, 0.35);
-  background: rgba(59, 130, 246, 0.05);
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 24%, var(--color-bg-tertiary));
 }
 .vram--good .vram-dot {
-  background: #3b82f6;
-  box-shadow: 0 0 6px rgba(59, 130, 246, 0.7);
+  background: var(--color-accent);
+  box-shadow: 0 0 6px var(--color-accent-glow);
 }
 .vram--good .vram-usage-badge {
-  background: rgba(59, 130, 246, 0.15);
-  color: #3b82f6;
+  background: var(--color-accent);
+  color: var(--color-on-accent, white);
 }
 
 .vram--warning {
@@ -1746,8 +1891,8 @@ input:checked + .slider:before {
 
 .btn-micro-preset--active {
   border-color: var(--color-accent);
-  color: var(--color-text-accent);
-  background: var(--color-accent-subtle);
+  color: var(--color-on-bg, var(--color-text-primary));
+  background: color-mix(in srgb, var(--color-accent) 28%, var(--color-bg-tertiary));
 }
 
 /* Theme Cards */
@@ -1762,28 +1907,29 @@ input:checked + .slider:before {
   flex-direction: column;
   padding: 12px;
   border-radius: 12px;
-  background: var(--color-bg-tertiary);
-  border: 1.5px solid var(--color-border);
+  background: var(--theme-card-bg, var(--color-bg-tertiary));
+  border: 1.5px solid var(--theme-card-accent, var(--color-border));
+  color: var(--theme-card-text, var(--color-text-primary));
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   gap: 10px;
 }
 
 .theme-card:hover {
-  border-color: var(--color-border-light);
+  border-color: var(--theme-card-accent, var(--color-border-light));
   transform: translateY(-2px);
 }
 
 .theme-card--active {
-  border-color: var(--color-accent) !important;
-  box-shadow: 0 0 16px var(--color-accent-glow);
+  border-color: var(--theme-card-accent, var(--color-accent)) !important;
+  box-shadow: 0 0 16px color-mix(in srgb, var(--theme-card-accent, var(--color-accent)) 35%, transparent);
 }
 
 .theme-swatch-box {
   width: 100%;
   height: 60px;
   border-radius: 8px;
-  border: 1px solid var(--color-border);
+  border: 1px solid color-mix(in srgb, var(--theme-card-text, var(--color-text-primary)) 35%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1805,6 +1951,107 @@ input:checked + .slider:before {
   border-radius: 50%;
 }
 
+.theme-custom-color-chip {
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.72);
+  border-radius: 6px;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.28);
+}
+
+.custom-theme-editor {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+}
+
+.custom-theme-editor__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.custom-theme-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.custom-theme-popup {
+  width: 420px;
+  max-width: 100%;
+  padding: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-bg-secondary);
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.55);
+}
+
+.custom-theme-popup__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.custom-theme-popup__header h3 {
+  margin: 0 0 4px;
+  color: var(--color-text-primary);
+  font-size: 1rem;
+}
+
+.custom-theme-popup__header p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+}
+
+.custom-theme-popup__done {
+  width: 100%;
+  justify-content: center;
+  margin-top: 22px;
+}
+
+.custom-color-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.custom-color-control {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+}
+
+.custom-color-control input {
+  width: 36px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-input);
+  cursor: pointer;
+}
+
+.custom-color-control code {
+  grid-column: 1 / -1;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+
 .theme-info {
   display: flex;
   flex-direction: column;
@@ -1820,16 +2067,16 @@ input:checked + .slider:before {
 .theme-name {
   font-size: 0.8rem;
   font-weight: 600;
-  color: var(--color-text-primary);
+  color: var(--theme-card-text, var(--color-text-primary));
 }
 
 .theme-check-icon {
-  color: var(--color-accent);
+  color: var(--theme-card-accent, var(--color-accent));
 }
 
 .theme-desc {
   font-size: 0.68rem;
-  color: var(--color-text-muted);
+  color: color-mix(in srgb, var(--theme-card-text, var(--color-text-muted)) 72%, transparent);
 }
 
 /* Storage / Memory Section */
@@ -1858,7 +2105,7 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(139, 92, 246, 0.25);
+  border: 1px solid var(--color-accent-subtle);
 }
 
 .storage-header-text {
@@ -1881,6 +2128,44 @@ input:checked + .slider:before {
 .storage-actions-row {
   display: flex;
   gap: 8px;
+}
+
+.memory-folder-button {
+  position: relative;
+  overflow: hidden;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent-subtle);
+  transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.memory-folder-button::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 25%, var(--color-accent-subtle) 50%, transparent 75%);
+  transform: translateX(-120%);
+  transition: transform 0.45s ease;
+}
+
+.memory-folder-button:hover {
+  transform: translateY(-2px);
+  background: color-mix(in srgb, var(--color-accent) 28%, var(--color-bg-hover));
+  border-color: var(--color-accent);
+  box-shadow: 0 5px 16px var(--color-accent-glow);
+}
+
+.memory-folder-button:hover::after {
+  transform: translateX(120%);
+}
+
+.memory-folder-button:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: 0 1px 5px var(--color-accent-glow);
+}
+
+.memory-folder-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
 }
 
 .export-import-grid {
@@ -1970,20 +2255,20 @@ input:checked + .slider:before {
 }
 
 .btn--secondary {
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  color: var(--color-text-secondary);
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-accent-subtle);
+  color: var(--color-text-primary);
 }
 
 .btn--secondary:hover {
-  background: var(--color-bg-hover);
+  background: color-mix(in srgb, var(--color-accent) 22%, var(--color-bg-hover));
   color: var(--color-text-primary);
-  border-color: var(--color-border-light);
+  border-color: var(--color-accent);
 }
 
 .btn--primary {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent, white);
 }
 
 .btn--primary:hover {

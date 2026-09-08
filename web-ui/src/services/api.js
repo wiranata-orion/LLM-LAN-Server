@@ -12,6 +12,11 @@ export const DEFAULT_SETTINGS = {
   temperature: 0.7,
   maxTokens: '',
   storageDirName: '',
+  customTheme: {
+    background: '#10131a',
+    accent: '#22c55e',
+    text: '#f3f4f6',
+  },
 }
 
 export function getSettings() {
@@ -35,6 +40,67 @@ export function saveSettingsToStorage(newSettings) {
   } catch (e) {
     return newSettings
   }
+}
+
+export function applyCustomTheme(customTheme = DEFAULT_SETTINGS.customTheme) {
+  const root = document.documentElement
+  const colors = {
+    background: customTheme.background || DEFAULT_SETTINGS.customTheme.background,
+    accent: customTheme.accent || DEFAULT_SETTINGS.customTheme.accent,
+    text: customTheme.text || DEFAULT_SETTINGS.customTheme.text,
+  }
+
+  root.style.setProperty('--custom-bg', colors.background)
+  root.style.setProperty('--custom-accent', colors.accent)
+  root.style.setProperty('--custom-text', colors.text)
+  const readableText = getReadableThemeText(colors.text, colors.background)
+  const readableAccent = getContrastRatio(colors.accent, colors.background) >= 3
+    ? colors.accent
+    : readableText
+  root.style.setProperty('--custom-readable-text', readableText)
+  root.style.setProperty('--custom-readable-accent', readableAccent)
+  root.style.setProperty('--color-on-bg', readableText)
+  root.style.setProperty('--color-on-accent', getReadableTextColor(colors.accent))
+}
+
+export function clearCustomThemeContrast() {
+  const root = document.documentElement
+  root.style.removeProperty('--custom-readable-text')
+  root.style.removeProperty('--custom-readable-accent')
+  root.style.removeProperty('--color-on-bg')
+  root.style.removeProperty('--color-on-accent')
+}
+
+function getReadableThemeText(textColor, backgroundColor) {
+  return getContrastRatio(textColor, backgroundColor) >= 4.5
+    ? textColor
+    : getReadableTextColor(backgroundColor)
+}
+
+function getContrastRatio(firstColor, secondColor) {
+  const firstLuminance = getRelativeLuminance(firstColor)
+  const secondLuminance = getRelativeLuminance(secondColor)
+  const lighter = Math.max(firstLuminance, secondLuminance)
+  const darker = Math.min(firstLuminance, secondLuminance)
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+function getRelativeLuminance(hexColor) {
+  const hex = hexColor.replace('#', '')
+  const normalized = hex.length === 3
+    ? hex.split('').map((digit) => digit + digit).join('')
+    : hex
+  const channels = [0, 2, 4].map((offset) => parseInt(normalized.slice(offset, offset + 2), 16) / 255)
+  const linear = channels.map((channel) => (
+    channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  ))
+  return (0.2126 * linear[0]) + (0.7152 * linear[1]) + (0.0722 * linear[2])
+}
+
+function getReadableTextColor(hexColor) {
+  const blackContrast = getContrastRatio('#10131a', hexColor)
+  const whiteContrast = getContrastRatio('#ffffff', hexColor)
+  return blackContrast >= whiteContrast ? '#10131a' : '#ffffff'
 }
 
 export function getApiUrl() {

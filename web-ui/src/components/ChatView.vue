@@ -189,11 +189,11 @@ function emitRegenerate() {
   width: 72px;
   height: 72px;
   border-radius: 20px;
-  background: linear-gradient(135deg, var(--color-accent), #6d28d9);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-hover));
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
+  color: var(--color-on-accent, white);
   box-shadow: 0 0 40px var(--color-accent-glow);
   animation: float 3s ease-in-out infinite;
 }

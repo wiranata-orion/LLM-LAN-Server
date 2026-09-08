@@ -378,7 +378,6 @@ onUnmounted(() => {
     <!-- Model Selector -->
     <div class="model-selector-wrapper">
       <button class="model-selector" @click="toggleModelDropdown" id="model-selector-btn">
-        <span class="model-label">Model</span>
         <span class="model-name">{{ selectedModelDisplay }}</span>
         <ChevronDown :size="14" :class="{ rotated: showModelDropdown }" />
       </button>
@@ -713,11 +712,11 @@ onUnmounted(() => {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--color-accent), #6d28d9);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-hover));
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
+  color: var(--color-on-accent, white);
 }
 
 .brand-text {
@@ -855,7 +854,7 @@ onUnmounted(() => {
 
 .model-option--active .model-option-badge {
   color: var(--color-text-accent);
-  background: rgba(139, 92, 246, 0.2);
+  background: var(--color-accent-subtle);
 }
 
 /* Conversation List */
@@ -891,12 +890,12 @@ onUnmounted(() => {
 
 .quick-action-btn--primary {
   background: var(--color-accent-subtle);
-  border: 1px solid rgba(139, 92, 246, 0.35);
+  border: 1px solid var(--color-accent);
   color: var(--color-text-accent);
 }
 
 .quick-action-btn--primary:hover {
-  background: rgba(139, 92, 246, 0.22);
+  background: var(--color-accent-subtle);
   border-color: var(--color-accent);
   box-shadow: 0 0 14px var(--color-accent-glow);
   transform: translateY(-1px);
@@ -1058,7 +1057,7 @@ onUnmounted(() => {
 
 .btn-micro--confirm {
   background: var(--color-accent);
-  color: white;
+  color: var(--color-on-accent, white);
 }
 
 .btn-micro--confirm:hover {
@@ -1086,8 +1085,8 @@ onUnmounted(() => {
 }
 
 .folder-item--dragover {
-  background: var(--color-accent-subtle);
-  border: 1px dashed var(--color-accent);
+    background: var(--color-accent-subtle);
+    border-color: var(--color-accent);
 }
 
 .folder-header {
@@ -1494,15 +1493,15 @@ onUnmounted(() => {
     border-color: var(--color-accent);
   }
   50% {
-    background: rgba(99, 102, 241, 0.2);
-    border-color: rgba(99, 102, 241, 0.9);
+    background: var(--color-accent-subtle);
+    border-color: var(--color-accent);
   }
 }
 
 .root-drop-banner--dragover {
   background: var(--color-accent) !important;
-  color: white !important;
-  border-color: white !important;
+  color: var(--color-on-accent, white) !important;
+  border-color: var(--color-on-accent, white) !important;
   transform: scale(1.02);
   box-shadow: 0 4px 14px var(--color-accent-glow);
 }
