@@ -26,6 +26,7 @@ export interface MemorySearchResult extends MemoryRecord {
 export interface MemoryCore {
   appendMessage(sender: string, message: string, metadata?: Record<string, unknown>): Promise<MemoryRecord>
   search(query: string): Promise<MemorySearchResult[]>
+  getCoreProfile(): Promise<string>
   exportJsonl(outputPath: string): Promise<void>
   importJsonl(inputPath: string): Promise<number>
   close(): void
@@ -115,6 +116,7 @@ export class SqliteMemoryCore implements MemoryCore {
       console.warn('Memory semantic search unavailable; using exact keyword search:', error)
     }
 
+
     const vectorResults = queryEmbedding
       ? await this.vectorStore.search(queryEmbedding, rows.length, -1)
       : []
@@ -130,6 +132,30 @@ export class SqliteMemoryCore implements MemoryCore {
       .sort((left, right) => right.score - left.score)
       .slice(0, config.maxRetrievedChunks)
   }
+
+  async getCoreProfile(): Promise<string> {
+      try {
+        // Menyiapkan statement query langsung ke tabel 'conversations'
+        const stmt = this.database.prepare(`
+          SELECT sender, message 
+          FROM conversations 
+          WHERE message LIKE '%nama%' 
+            OR message LIKE '%panggil%' 
+            OR message LIKE '%profile%' 
+            OR metadata LIKE '%profile%'
+          ORDER BY timestamp DESC 
+          LIMIT 5
+        `)
+        
+        const rows = stmt.all() as Array<{ sender: string; message: string }>
+        if (!rows.length) return ''
+
+        return rows.map((r) => `${r.sender}: ${r.message}`).join('\n')
+      } catch (error) {
+        console.warn('Failed to retrieve core profile from SQLite:', error)
+        return ''
+      }
+    }
 
   async exportJsonl(outputPath: string): Promise<void> {
     await mkdir(path.dirname(outputPath), { recursive: true })
