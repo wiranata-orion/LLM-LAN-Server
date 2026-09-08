@@ -24,6 +24,7 @@ import {
   checkEnginePing,
   DEFAULT_SETTINGS,
 } from '../services/api.js'
+import { setMemoryDirectoryHandle } from '../services/memory.js'
 
 const props = defineProps({
   conversations: {
@@ -36,7 +37,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['close', 'save', 'import-data'])
+const emit = defineEmits(['close', 'save', 'import-data', 'folder-changed'])
 
 // Active tab in Settings: 'engine' | 'ai' | 'theme' | 'storage'
 const activeTab = ref('engine')
@@ -322,9 +323,20 @@ async function pickPhysicalFolder() {
     return
   }
   try {
-    directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
-    selectedStorageDir.value = directoryHandle.name
-    showToast(`Folder "${directoryHandle.name}" terhubung.`)
+    const nextDirectoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
+    const permission = typeof nextDirectoryHandle.requestPermission === 'function'
+      ? await nextDirectoryHandle.requestPermission({ mode: 'readwrite' })
+      : 'granted'
+    if (permission !== 'granted') {
+      showToast('Izin baca/tulis folder ditolak. Memory belum diaktifkan.')
+      return
+    }
+    await nextDirectoryHandle.getDirectoryHandle('conversations', { create: true })
+    directoryHandle = nextDirectoryHandle
+    setMemoryDirectoryHandle(nextDirectoryHandle)
+    selectedStorageDir.value = nextDirectoryHandle.name
+    emit('folder-changed', nextDirectoryHandle)
+    showToast(`Folder "${nextDirectoryHandle.name}" terhubung.`)
   } catch (err) {
     if (err.name !== 'AbortError') {
       console.error('Directory picker error:', err)
@@ -932,7 +944,7 @@ function resetDefaults() {
           <!-- TAB 4: PENYIMPANAN / MEMORY (.json) -->
           <div v-if="activeTab === 'storage'" class="tab-pane">
             <div class="section-title-group">
-              <span class="section-title">Penyimpanan Memory & Cadangan (.json)</span>
+              <span class="section-title">Penyimpanan Memory & Cadangan</span>
               <span class="section-desc">Pilih folder fisik di Laptop atau Flashdisk untuk menyimpan riwayat chat Anda</span>
             </div>
 
@@ -958,9 +970,8 @@ function resetDefaults() {
               </div>
             </div>
 
-            <!-- Export / Import Buttons -->
+            <!-- Export / Import Buttons
             <div class="export-import-grid">
-              <!-- Export Card -->
               <div class="backup-card glass">
                 <Download :size="18" class="backup-icon" />
                 <div class="backup-info">
@@ -972,7 +983,7 @@ function resetDefaults() {
                 </button>
               </div>
 
-              <!-- Import Card -->
+              
               <div class="backup-card glass">
                 <Upload :size="18" class="backup-icon" />
                 <div class="backup-info">
@@ -984,7 +995,7 @@ function resetDefaults() {
                   <input type="file" accept=".json" class="file-hidden-input" @change="handleFileInput" />
                 </label>
               </div>
-            </div>
+            </div> -->
           </div>
         </div>
 

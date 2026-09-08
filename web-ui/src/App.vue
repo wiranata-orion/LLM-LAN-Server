@@ -5,6 +5,13 @@ import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
 import { getModels, sendMessageStream, getSettings, saveSettingsToStorage } from './services/api.js'
+import {
+  buildMemoryMessages,
+  loadStoredConversations,
+  loadStoredFolders,
+  saveConversation,
+  saveStoredFolders,
+} from './services/memory.js'
 
 // ===== State =====
 const sidebarOpen = ref(true)
@@ -49,7 +56,10 @@ function handleEngineFallback(e) {
 // ===== Lifecycle =====
 onMounted(async () => {
   // Load saved state
-  loadState()
+  loadState({
+    includeConversations: !getSettings().storageDirName,
+    includeFolders: !getSettings().storageDirName,
+  })
 
   // Apply saved theme & engine
   const s = getSettings()
@@ -78,7 +88,12 @@ async function fetchModels() {
     const fetched = await getModels()
     if (fetched && fetched.length > 0) {
       isCurrentEngineOnline.value = true
-      models.value = fetched.map((m) => {
+      models.value = fetched
+        .filter((m) => {
+          const name = typeof m === 'string' ? m : (m.name || '')
+          return !/^nomic-embed-text(?::|$)/i.test(name)
+        })
+        .map((m) => {
         const name = typeof m === 'string' ? m : (m.name || '')
         const size = m.size ? `${(m.size / 1e9).toFixed(1)}GB` : ''
         return {
@@ -86,7 +101,7 @@ async function fetchModels() {
           desc: m.desc || size,
           size: m.size,
         }
-      })
+        })
     } else {
       isCurrentEngineOnline.value = false
       models.value = []
@@ -238,8 +253,9 @@ function stopGeneration() {
 }
 
 // Send a user message and trigger assistant response
-function sendMessage(text) {
-  if (!activeConversation.value || isGenerating.value) return
+async function sendMessage(text) {
+  if (isGenerating.value) return
+  if (!activeConversation.value) createNewChat()
 
   // Check model
   if (!selectedModel.value) {
@@ -261,6 +277,11 @@ function sendMessage(text) {
     activeConversation.value.title = text.substring(0, 50) + (text.length > 50 ? '...' : '')
   }
 
+  // Save immediately so retrieval cannot delay or prevent persistence of the user message.
+  saveConversation(activeConversation.value, selectedModel.value).catch((error) => {
+    console.error('Conversation memory initial save failed:', error)
+  })
+
   // Generate assistant response
   generateAssistantResponse()
 }
@@ -279,7 +300,7 @@ function handleRegenerate() {
   generateAssistantResponse()
 }
 
-function generateAssistantResponse() {
+async function generateAssistantResponse() {
   const conv = activeConversation.value
   if (!conv) return
   // Add empty assistant message for streaming
@@ -291,9 +312,15 @@ function generateAssistantResponse() {
   const assistantIdx = conv.messages.length - 1
   isGenerating.value = true
 
-  const apiMessages = conv.messages
+  const conversationMessages = conv.messages
     .slice(0, -1)
     .map(m => ({ role: m.role, content: m.content }))
+
+  const memoryMessages = await buildMemoryMessages({
+    query: conversationMessages[conversationMessages.length - 1]?.content || '',
+    model: selectedModel.value,
+  })
+  const apiMessages = [...memoryMessages, ...conversationMessages]
 
   abortController = new AbortController()
   const signal = abortController.signal
@@ -307,9 +334,12 @@ function generateAssistantResponse() {
       if (signal.aborted) return
       conv.messages[assistantIdx].content += token
     },
-    onDone: () => {
+    onDone: async () => {
       isGenerating.value = false
       abortController = null
+      saveConversation(conv, selectedModel.value).catch((error) => {
+        console.error('Conversation memory final save failed:', error)
+      })
       saveState()
     },
     onError: err => {
@@ -319,6 +349,9 @@ function generateAssistantResponse() {
       if (!errMsg.content) {
         errMsg.content = `Error: ${err.message}`
       }
+      saveConversation(conv, selectedModel.value).catch((saveError) => {
+        console.error('Conversation memory error save failed:', saveError)
+      })
       saveState()
     },
   })
@@ -368,12 +401,42 @@ function closeSettings() {
   showSettings.value = false
 }
 
-function onSettingsSave(newSettings) {
+async function onSettingsSave(newSettings) {
   updateCurrentEngine()
   if (newSettings?.theme) {
     document.documentElement.setAttribute('data-theme', newSettings.theme)
   }
-  fetchModels()
+  await fetchModels()
+  if (newSettings?.storageDirName) {
+    let storedConversations = []
+    try {
+      storedConversations = await loadStoredConversations(selectedModel.value, {
+        requireConnection: false,
+      }) || []
+    } catch (error) {
+      console.error('Failed to load conversations from the selected folder:', error)
+    }
+    conversations.splice(0, conversations.length, ...storedConversations)
+    activeConversationId.value = conversations[0]?.id || null
+  }
+}
+
+async function onFolderChanged() {
+  conversations.splice(0, conversations.length)
+  folders.splice(0, folders.length)
+  activeConversationId.value = null
+
+  try {
+    const [storedConversations, storedFolders] = await Promise.all([
+      loadStoredConversations(selectedModel.value, { requireConnection: false }),
+      loadStoredFolders(selectedModel.value),
+    ])
+    conversations.splice(0, conversations.length, ...(storedConversations || []))
+    folders.splice(0, folders.length, ...(storedFolders || []))
+    activeConversationId.value = conversations[0]?.id || null
+  } catch (error) {
+    console.error('Failed to load conversations after folder change:', error)
+  }
 }
 
 function handleImportData(data) {
@@ -416,17 +479,20 @@ function saveState() {
       selectedModel: selectedModel.value,
     }
     localStorage.setItem('llm-chat-state', JSON.stringify(state))
+    saveStoredFolders(folders, selectedModel.value).catch((error) => {
+      console.error('Failed to save folders to the selected directory:', error)
+    })
   } catch (e) {
     // ignore
   }
 }
 
-function loadState() {
+function loadState({ includeConversations = true, includeFolders = true } = {}) {
   try {
     const saved = localStorage.getItem('llm-chat-state')
     if (saved) {
       const state = JSON.parse(saved)
-      if (state.folders && Array.isArray(state.folders)) {
+      if (includeFolders && state.folders && Array.isArray(state.folders)) {
         folders.push(
           ...state.folders.map((f) => ({
             ...f,
@@ -434,7 +500,7 @@ function loadState() {
           }))
         )
       }
-      if (state.conversations && Array.isArray(state.conversations)) {
+      if (includeConversations && state.conversations && Array.isArray(state.conversations)) {
         conversations.push(
           ...state.conversations.map((c) => ({
             ...c,
@@ -557,6 +623,7 @@ function loadState() {
       :folders="folders"
       @close="closeSettings"
       @save="onSettingsSave"
+      @folder-changed="onFolderChanged"
       @import-data="handleImportData"
     />
   </div>
