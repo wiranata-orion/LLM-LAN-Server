@@ -392,7 +392,7 @@ onUnmounted(() => {
             v-if="models.length === 0"
             class="model-option model-option--empty"
           >
-            No models found. Is LLM running?
+            No models
           </div>
           <button
             v-for="model in models"

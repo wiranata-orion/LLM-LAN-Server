@@ -20,14 +20,35 @@ function renderMarkdown(text) {
   if (!text) return ''
 
   let html = text
-    // Escape HTML
+
+  // ---- Code blocks: extract and protect first ----
+  const codeBlocks = []
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const safeCode = code.trim()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+    const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`
+    codeBlocks.push(
+      `<div class="code-card"><div class="code-header"><span class="code-lang">${lang || 'code'}</span><button class="copy-code-btn" data-code="${safeCode.replace(/"/g, '&quot;')}" onclick="copyCode(this.dataset.code)">Copy</button></div><pre><code class="language-${lang}">${safeCode}</code></pre></div>`
+    )
+    return placeholder
+  })
+
+  // Escape HTML (after code blocks are protected)
+  html = html
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 
-  // Code blocks (```lang\ncode\n```)
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    return `<pre><code class="language-${lang}">${code.trim()}</code></pre>`
+  // ---- LaTeX Math ----
+  // Display math: $$...$$
+  html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
+    return `<div class="math-block">${formatMath(math.trim())}</div>`
+  })
+  // Inline math: $...$
+  html = html.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+    return `<span class="math-inline">${formatMath(math.trim())}</span>`
   })
 
   // Inline code
@@ -39,6 +60,9 @@ function renderMarkdown(text) {
   // Italic
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
 
+  // Strikethrough
+  html = html.replace(/~~(.+?)~~/g, '<del>$1</del>')
+
   // Blockquotes
   html = html.replace(/^&gt;\s?(.+)$/gm, '<blockquote>$1</blockquote>')
 
@@ -48,20 +72,43 @@ function renderMarkdown(text) {
   html = html.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
   html = html.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>')
 
-  // Unordered lists
-  html = html.replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>')
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`)
-
-  // Ordered lists
-  html = html.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>')
-
   // Horizontal rule
   html = html.replace(/^---$/gm, '<hr>')
 
   // Links
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
 
-  // Paragraphs: wrap consecutive non-block lines
+  // ---- Tables ----
+  html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (tableBlock) => {
+    const rows = tableBlock.trim().split('\n').filter(r => r.trim())
+    if (rows.length < 2) return tableBlock
+    // Check if second row is a separator row (|---|---|)
+    const sepRow = rows[1]
+    if (!/^\|[\s\-:|]+\|$/.test(sepRow)) return tableBlock
+    const headerCells = rows[0].split('|').filter((c, i, a) => i > 0 && i < a.length - 1).map(c => c.trim())
+    const bodyRows = rows.slice(2)
+    let tableHtml = '<table><thead><tr>'
+    headerCells.forEach(c => { tableHtml += `<th>${c}</th>` })
+    tableHtml += '</tr></thead><tbody>'
+    bodyRows.forEach(row => {
+      const cells = row.split('|').filter((c, i, a) => i > 0 && i < a.length - 1).map(c => c.trim())
+      tableHtml += '<tr>'
+      cells.forEach(c => { tableHtml += `<td>${c}</td>` })
+      tableHtml += '</tr>'
+    })
+    tableHtml += '</tbody></table>'
+    return tableHtml
+  })
+
+  // ---- Nested lists (stack-based) ----
+  html = processLists(html)
+
+  // Restore code blocks
+  codeBlocks.forEach((block, i) => {
+    html = html.replace(`%%CODEBLOCK_${i}%%`, block)
+  })
+
+  // Paragraphs: wrap non-block lines
   html = html
     .split('\n\n')
     .map((block) => {
@@ -73,7 +120,10 @@ function renderMarkdown(text) {
         trimmed.startsWith('<ul') ||
         trimmed.startsWith('<ol') ||
         trimmed.startsWith('<blockquote') ||
-        trimmed.startsWith('<hr')
+        trimmed.startsWith('<hr') ||
+        trimmed.startsWith('<div') ||
+        trimmed.startsWith('<table') ||
+        trimmed.startsWith('%%CODEBLOCK')
       ) {
         return trimmed
       }
@@ -82,6 +132,167 @@ function renderMarkdown(text) {
     .join('\n')
 
   return html
+}
+
+// ---- Process nested lists ----
+function processLists(html) {
+  const lines = html.split('\n')
+  const result = []
+  let i = 0
+
+  while (i < lines.length) {
+    const line = lines[i]
+    // Check if this line is a list item (ordered or unordered)
+    const olMatch = line.match(/^(\s*)\d+\.\s+(.*)/)
+    const ulMatch = line.match(/^(\s*)[-*]\s+(.*)/)
+
+    if (olMatch || ulMatch) {
+      // Collect all consecutive list lines
+      const listLines = []
+      while (i < lines.length) {
+        const lo = lines[i].match(/^(\s*)\d+\.\s+(.*)/)
+        const lu = lines[i].match(/^(\s*)[-*]\s+(.*)/)
+        if (lo || lu) {
+          const indent = (lo ? lo[1] : lu[1]).length
+          const content = lo ? lo[2] : lu[2]
+          const type = lo ? 'ol' : 'ul'
+          listLines.push({ indent, content, type })
+          i++
+        } else if (!lines[i].trim() && i + 1 < lines.length) {
+          const nextIsList = /^(\s*)(?:\d+\.|[-*])\s+/.test(lines[i + 1])
+          if (nextIsList) {
+            i++
+          } else {
+            break
+          }
+        } else {
+          break
+        }
+      }
+      result.push(buildNestedList(listLines))
+    } else {
+      result.push(line)
+      i++
+    }
+  }
+  return result.join('\n')
+}
+
+function buildNestedList(items) {
+  if (items.length === 0) return ''
+
+  let html = ''
+  const stack = [] // { type, indent }
+  const minIndent = Math.min(...items.map(it => it.indent))
+
+  for (const item of items) {
+    const level = Math.floor((item.indent - minIndent) / 2)
+    const type = item.type
+
+    while (stack.length > level + 1) {
+      const popped = stack.pop()
+      html += `</li></${popped.type}>`
+    }
+
+    if (stack.length === level + 1) {
+      if (stack[stack.length - 1].type !== type) {
+        const popped = stack.pop()
+        html += `</li></${popped.type}>`
+        html += `<${type}><li>${item.content}`
+        stack.push({ type, indent: item.indent })
+      } else {
+        html += `</li><li>${item.content}`
+      }
+    } else {
+      while (stack.length < level) {
+        html += `<ol><li>`
+        stack.push({ type: 'ol', indent: 0 })
+      }
+      html += `<${type}><li>${item.content}`
+      stack.push({ type, indent: item.indent })
+    }
+  }
+
+  while (stack.length > 0) {
+    const popped = stack.pop()
+    html += `</li></${popped.type}>`
+  }
+
+  return html
+}
+
+// ---- LaTeX math formatter ----
+function formatMath(latex) {
+  let result = latex
+  // Fractions: \frac{a}{b} → a/b styled
+  result = result.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g,
+    '<span class="math-frac"><span class="math-num">$1</span><span class="math-den">$2</span></span>')
+  // Superscript: x^{2} or x^2
+  result = result.replace(/\^{([^}]+)}/g, '<sup>$1</sup>')
+  result = result.replace(/\^(\w)/g, '<sup>$1</sup>')
+  // Subscript: x_{i} or x_i
+  result = result.replace(/_{([^}]+)}/g, '<sub>$1</sub>')
+  result = result.replace(/_(\w)/g, '<sub>$1</sub>')
+  // Square root: \sqrt{x}
+  result = result.replace(/\\sqrt\{([^}]+)\}/g, '√($1)')
+  // Greek letters
+  const greeks = {
+    alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε',
+    zeta: 'ζ', eta: 'η', theta: 'θ', iota: 'ι', kappa: 'κ',
+    lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π',
+    rho: 'ρ', sigma: 'σ', tau: 'τ', upsilon: 'υ', phi: 'φ',
+    chi: 'χ', psi: 'ψ', omega: 'ω',
+    Alpha: 'Α', Beta: 'Β', Gamma: 'Γ', Delta: 'Δ', Epsilon: 'Ε',
+    Zeta: 'Ζ', Eta: 'Η', Theta: 'Θ', Iota: 'Ι', Kappa: 'Κ',
+    Lambda: 'Λ', Mu: 'Μ', Nu: 'Ν', Xi: 'Ξ', Pi: 'Π',
+    Rho: 'Ρ', Sigma: 'Σ', Tau: 'Τ', Upsilon: 'Υ', Phi: 'Φ',
+    Chi: 'Χ', Psi: 'Ψ', Omega: 'Ω',
+  }
+  for (const [name, symbol] of Object.entries(greeks)) {
+    result = result.replace(new RegExp(`\\\\${name}\\b`, 'g'), symbol)
+  }
+  // Math operators
+  result = result.replace(/\\times/g, '×')
+  result = result.replace(/\\div/g, '÷')
+  result = result.replace(/\\pm/g, '±')
+  result = result.replace(/\\mp/g, '∓')
+  result = result.replace(/\\cdot/g, '·')
+  result = result.replace(/\\leq/g, '≤')
+  result = result.replace(/\\geq/g, '≥')
+  result = result.replace(/\\neq/g, '≠')
+  result = result.replace(/\\approx/g, '≈')
+  result = result.replace(/\\infty/g, '∞')
+  result = result.replace(/\\sum/g, '∑')
+  result = result.replace(/\\prod/g, '∏')
+  result = result.replace(/\\int/g, '∫')
+  result = result.replace(/\\partial/g, '∂')
+  result = result.replace(/\\nabla/g, '∇')
+  result = result.replace(/\\forall/g, '∀')
+  result = result.replace(/\\exists/g, '∃')
+  result = result.replace(/\\in/g, '∈')
+  result = result.replace(/\\notin/g, '∉')
+  result = result.replace(/\\subset/g, '⊂')
+  result = result.replace(/\\supset/g, '⊃')
+  result = result.replace(/\\cup/g, '∪')
+  result = result.replace(/\\cap/g, '∩')
+  result = result.replace(/\\rightarrow/g, '→')
+  result = result.replace(/\\leftarrow/g, '←')
+  result = result.replace(/\\Rightarrow/g, '⇒')
+  result = result.replace(/\\Leftarrow/g, '⇐')
+  result = result.replace(/\\therefore/g, '∴')
+  result = result.replace(/\\because/g, '∵')
+  // Brackets
+  result = result.replace(/\\left\(/g, '(')
+  result = result.replace(/\\right\)/g, ')')
+  result = result.replace(/\\left\[/g, '[')
+  result = result.replace(/\\right\]/g, ']')
+  result = result.replace(/\\{/g, '{')
+  result = result.replace(/\\}/g, '}')
+  // Text inside math
+  result = result.replace(/\\text\{([^}]+)\}/g, '<span class="math-text">$1</span>')
+  // Clean remaining backslashes from unknown commands
+  result = result.replace(/\\([a-zA-Z]+)/g, '$1')
+  return result
 }
 
 async function copyContent() {
@@ -95,6 +306,19 @@ async function copyContent() {
     console.error('Copy failed:', err)
   }
 }
+
+// Copy code block content
+async function copyCode(code) {
+  try {
+    await navigator.clipboard.writeText(code)
+    // optional visual feedback could be added here
+    console.log('Code copied')
+  } catch (err) {
+    console.error('Copy code failed:', err)
+  }
+}
+
+window.copyCode = copyCode
 </script>
 
 <template>
@@ -110,7 +334,7 @@ async function copyContent() {
 
     <!-- Content -->
     <div class="message-content-wrapper">
-      <span class="message-role">{{ isUser ? 'You' : 'AI' }}</span>
+      <span class="message-role">{{ isUser ? 'You' : 'Xufruz' }}</span>
 
       <div v-if="isUser" class="message-bubble message-bubble--user">
         {{ message.content }}
@@ -123,30 +347,29 @@ async function copyContent() {
       ></div>
 
       <!-- Actions (AI only) -->
-      <div v-if="isAssistant && message.content" class="message-actions">
-        <button
-          class="action-btn"
-          @click="copyContent"
-          :title="copied ? 'Copied!' : 'Copy response'"
-        >
-          <Check v-if="copied" :size="14" />
-          <Copy v-else :size="14" />
-          <span>{{ copied ? 'Copied' : 'Copy' }}</span>
-        </button>
-      </div>
+
     </div>
   </div>
 </template>
 
-<style scoped>
+<style>
 .message-row {
   display: flex;
   gap: 12px;
   padding: 20px 24px;
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
   width: 100%;
   animation: fadeSlideIn 0.3s ease;
+}
+
+/* Separator line only after assistant (AI) messages */
+.message-row--assistant {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.message-row--assistant:last-child {
+  border-bottom: none;
 }
 
 @keyframes fadeSlideIn {
@@ -242,4 +465,224 @@ async function copyContent() {
   border-color: var(--color-border-light);
   background: var(--color-bg-hover);
 }
+
+/* ===== Code block card ===== */
+.code-card {
+  background: var(--color-bg-secondary);
+  border-radius: 8px;
+  margin: 12px 0;
+  overflow: hidden;
+  box-shadow: 0 2px 6px var(--color-shadow);
+}
+
+.code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--color-bg-tertiary);
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.code-lang {
+  font-family: var(--font-mono);
+}
+
+.copy-code-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 2px 6px;
+}
+
+.copy-code-btn:hover {
+  color: var(--color-text-primary);
+}
+
+/* ===== List styling (nested) ===== */
+.markdown-body ol,
+.markdown-body ul {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body li {
+  margin: 0.2em 0;
+  padding-left: 0.2em;
+}
+
+/* Nested list indentation */
+.markdown-body ol ol,
+.markdown-body ul ol,
+.markdown-body ol ul,
+.markdown-body ul ul {
+  margin: 0.2em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-body ol ol {
+  list-style-type: lower-alpha;
+}
+
+.markdown-body ol ol ol {
+  list-style-type: lower-roman;
+}
+
+.markdown-body ul ul {
+  list-style-type: circle;
+}
+
+.markdown-body ul ul ul {
+  list-style-type: square;
+}
+
+/* ===== Math formula styling ===== */
+.math-block {
+  display: block;
+  text-align: center;
+  padding: 16px 20px;
+  margin: 12px 0;
+  background: var(--color-bg-tertiary);
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  font-size: 1.1em;
+  font-family: 'Cambria Math', 'Latin Modern Math', 'STIX Two Math', Georgia, serif;
+  letter-spacing: 0.02em;
+  overflow-x: auto;
+}
+
+.math-inline {
+  font-family: 'Cambria Math', 'Latin Modern Math', 'STIX Two Math', Georgia, serif;
+  font-style: italic;
+  padding: 1px 4px;
+  background: rgba(139, 92, 246, 0.08);
+  border-radius: 4px;
+  font-size: 0.95em;
+}
+
+.math-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0 4px;
+}
+
+.math-num {
+  border-bottom: 1.5px solid currentColor;
+  padding: 0 4px 2px;
+  line-height: 1.3;
+}
+
+.math-den {
+  padding: 2px 4px 0;
+  line-height: 1.3;
+}
+
+.math-text {
+  font-style: normal;
+  font-family: var(--font-sans);
+}
+
+/* ===== Table styling ===== */
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  font-size: 0.88rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--color-border);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: var(--color-bg-tertiary);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.markdown-body td {
+  color: var(--color-text-secondary);
+}
+
+.markdown-body tr:hover td {
+  background: var(--color-bg-hover);
+}
+
+/* ===== Blockquote styling ===== */
+.markdown-body blockquote {
+  border-left: 3px solid var(--color-accent);
+  margin: 8px 0;
+  padding: 4px 16px;
+  color: var(--color-text-secondary);
+  background: rgba(139, 92, 246, 0.05);
+  border-radius: 0 6px 6px 0;
+}
+
+/* ===== Heading styling ===== */
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 16px 0 8px;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}
+
+.markdown-body h1 { font-size: 1.4em; }
+.markdown-body h2 { font-size: 1.2em; }
+.markdown-body h3 { font-size: 1.05em; }
+.markdown-body h4 { font-size: 0.95em; }
+
+/* ===== Inline code ===== */
+.markdown-body code {
+  background: var(--color-bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+/* ===== Horizontal rule ===== */
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 16px 0;
+}
+
+/* ===== Links ===== */
+.markdown-body a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+/* ===== Strikethrough ===== */
+.markdown-body del {
+  opacity: 0.6;
+}
+
+/* ===== Paragraphs ===== */
+.markdown-body p {
+  margin: 0.5em 0;
+}
 </style>
+
