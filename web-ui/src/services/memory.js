@@ -125,6 +125,14 @@ async function writeJsonFile(directory, fileName, value) {
   await writable.close()
 }
 
+async function deleteJsonFile(directory, fileName) {
+  try {
+    await directory.removeEntry(fileName)
+  } catch (error) {
+    if (error.name !== 'NotFoundError') throw error
+  }
+}
+
 async function readGlobalMemory(root) {
   const storedMemory = await readJsonFile(root, 'global_memory.json')
   if (storedMemory) {
@@ -310,6 +318,30 @@ export async function saveConversation(conversation, model) {
   cachedGlobalMemory = updatedMemory
   await writeJsonFile(directories.root, 'global_memory.json', updatedMemory)
   console.info(`Conversation memory saved: ${fileName}`)
+  return true
+}
+
+export async function deleteConversation(conversation, model) {
+  const directories = await getMemoryRoot(model, { requireConnection: false })
+  if (!directories || !conversation?.id) return false
+
+  for (const fileName of await listConversationFiles(directories.conversations)) {
+    const stored = await readJsonFile(directories.conversations, fileName)
+    if (stored?.conversationId === conversation.id) {
+      await deleteJsonFile(directories.conversations, fileName)
+      break
+    }
+  }
+
+  const currentMemory = await readGlobalMemory(directories.root)
+  const interactions = (currentMemory.interactions || [])
+    .filter((item) => item.conversationId !== conversation.id)
+  await writeJsonFile(directories.root, 'global_memory.json', {
+    ...currentMemory,
+    interactions,
+    updatedAt: new Date().toISOString(),
+  })
+  cachedGlobalMemory = { ...currentMemory, interactions }
   return true
 }
 

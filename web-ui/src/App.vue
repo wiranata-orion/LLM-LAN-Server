@@ -4,10 +4,11 @@ import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
-import { getModels, sendMessageStream, getSettings, saveSettingsToStorage } from './services/api.js'
+import { getModels, getSettings, saveSettingsToStorage } from './services/api.js'
+import { sendMessageStream as sendAgentMessageStream } from './services/api.ts'
 import {
-  buildMemoryMessages,
   loadStoredConversations,
+  deleteConversation,
   loadStoredFolders,
   saveConversation,
   saveStoredFolders,
@@ -72,8 +73,13 @@ onMounted(async () => {
   // Fetch real models
   await fetchModels()
 
-  // If no conversations, create one
-  if (conversations.length === 0) {
+  const settings = getSettings()
+  if (settings.storageDirName) {
+    await loadSelectedDirectoryState()
+  }
+
+  // Keep the existing local-chat behavior only when physical storage is not active.
+  if (!settings.storageDirName && conversations.length === 0) {
     createNewChat()
   }
 })
@@ -144,6 +150,9 @@ function renameChat(id, newTitle) {
   const conv = conversations.find((c) => c.id === id)
   if (conv && newTitle && newTitle.trim()) {
     conv.title = newTitle.trim()
+    saveConversation(conv, selectedModel.value).catch((error) => {
+      console.error('Failed to persist renamed conversation:', error)
+    })
     saveState()
   }
 }
@@ -152,7 +161,11 @@ function deleteChat(id) {
   const idx = conversations.findIndex((c) => c.id === id)
   if (idx === -1) return
 
+  const deletedConversation = conversations[idx]
   conversations.splice(idx, 1)
+  deleteConversation(deletedConversation, selectedModel.value).catch((error) => {
+    console.error('Failed to delete conversation from storage:', error)
+  })
 
   if (activeConversationId.value === id) {
     if (conversations.length > 0) {
@@ -237,6 +250,9 @@ function moveChatToFolder(chatId, targetFolderId) {
   const conv = conversations.find((c) => c.id === chatId)
   if (conv) {
     conv.folderId = targetFolderId || null
+    saveConversation(conv, selectedModel.value).catch((error) => {
+      console.error('Failed to persist conversation folder:', error)
+    })
     saveState()
   }
 }
@@ -316,45 +332,33 @@ async function generateAssistantResponse() {
     .slice(0, -1)
     .map(m => ({ role: m.role, content: m.content }))
 
-  const memoryMessages = await buildMemoryMessages({
-    query: conversationMessages[conversationMessages.length - 1]?.content || '',
-    model: selectedModel.value,
-  })
-  const apiMessages = [...memoryMessages, ...conversationMessages]
+  const latestUserMessage = conversationMessages[conversationMessages.length - 1]
+  const history = conversationMessages.slice(0, -1)
 
   abortController = new AbortController()
-  const signal = abortController.signal
-
-  sendMessageStream({
-    model: selectedModel.value,
-    messages: apiMessages,
-    signal,
-    onToken: token => {
-      // Stop appending tokens if generation was aborted
-      if (signal.aborted) return
-      conv.messages[assistantIdx].content += token
-    },
-    onDone: async () => {
-      isGenerating.value = false
-      abortController = null
-      saveConversation(conv, selectedModel.value).catch((error) => {
-        console.error('Conversation memory final save failed:', error)
-      })
-      saveState()
-    },
-    onError: err => {
-      isGenerating.value = false
-      abortController = null
-      const errMsg = conv.messages[assistantIdx]
-      if (!errMsg.content) {
-        errMsg.content = `Error: ${err.message}`
-      }
-      saveConversation(conv, selectedModel.value).catch((saveError) => {
-        console.error('Conversation memory error save failed:', saveError)
-      })
-      saveState()
-    },
-  })
+  try {
+    await sendAgentMessageStream(
+      latestUserMessage?.content || '',
+      history,
+      selectedModel.value,
+      abortController.signal,
+      conv.id,
+      (token) => {
+        conv.messages[assistantIdx].content += token
+      },
+    )
+  } catch (error) {
+    if (!abortController.signal.aborted) {
+      conv.messages[assistantIdx].content = `Error: ${error instanceof Error ? error.message : 'Agent request failed'}`
+    }
+  } finally {
+    isGenerating.value = false
+    abortController = null
+    saveConversation(conv, selectedModel.value).catch((error) => {
+      console.error('Conversation memory final save failed:', error)
+    })
+    saveState()
+  }
 }
 
 // ===== Model =====
@@ -422,6 +426,10 @@ async function onSettingsSave(newSettings) {
 }
 
 async function onFolderChanged() {
+  await loadSelectedDirectoryState()
+}
+
+async function loadSelectedDirectoryState() {
   conversations.splice(0, conversations.length)
   folders.splice(0, folders.length)
   activeConversationId.value = null
