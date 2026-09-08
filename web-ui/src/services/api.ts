@@ -71,17 +71,23 @@ export async function sendMessageStream(
   conversationId: string,
   onToken: (content: string) => void,
 ): Promise<void> {
-  const response = await fetch(`${getAgentApiUrl()}/chat`, {
-    method: 'POST',
-    signal,
-    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
-    body: JSON.stringify({
-      model,
-      conversationId,
-      stream: true,
-      messages: [...history, { role: 'user', content: message }],
-    }),
-  })
+  let response: Response
+  try {
+    response = await fetch(`${getAgentApiUrl()}/chat`, {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+      body: JSON.stringify({
+        model,
+        conversationId,
+        stream: true,
+        messages: [...history, { role: 'user', content: message }],
+      }),
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    throw new Error(`Agent server tidak dapat dihubungi di ${getAgentApiUrl()}. Jalankan agent-server terlebih dahulu.`)
+  }
   if (!response.ok || !response.body) {
     const payload = await response.json().catch(() => ({})) as { error?: string }
     throw new Error(payload.error || `Agent server error ${response.status}`)

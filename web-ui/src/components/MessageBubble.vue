@@ -53,8 +53,16 @@ function renderMarkdown(text) {
   html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
     return `<div class="math-block">${formatMath(math.trim())}</div>`
   })
+  // Display math: \[...\]
+  html = html.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => {
+    return `<div class="math-block">${formatMath(math.trim())}</div>`
+  })
   // Inline math: $...$
   html = html.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+    return `<span class="math-inline">${formatMath(math.trim())}</span>`
+  })
+  // Inline math: \(...\)
+  html = html.replace(/\\\(([^\n]*?)\\\)/g, (_, math) => {
     return `<span class="math-inline">${formatMath(math.trim())}</span>`
   })
 
@@ -260,6 +268,9 @@ function listItemValue(item) {
 // ---- LaTeX math formatter ----
 function formatMath(latex) {
   let result = latex
+  // Common font commands used for vectors and named operators.
+  result = result.replace(/\\mathbf\{([^}]+)\}/g, '<strong class="math-bold">$1</strong>')
+  result = result.replace(/\\mathrm\{([^}]+)\}/g, '<span class="math-roman">$1</span>')
   // Fractions: \frac{a}{b} → a/b styled
   result = result.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g,
     '<span class="math-frac"><span class="math-num">$1</span><span class="math-den">$2</span></span>')

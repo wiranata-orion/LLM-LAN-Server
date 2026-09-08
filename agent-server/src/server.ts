@@ -15,7 +15,20 @@ const ingestion = new IngestionService(store)
 const retriever = new Retriever(store)
 const orchestrator = new AgentOrchestrator(retriever, memory)
 
-app.use(cors({ origin: config.corsOrigin === '*' ? true : config.corsOrigin }))
+const allowedOrigins = config.corsOrigin
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      callback(null, true)
+      return
+    }
+    callback(new Error(`Origin tidak diizinkan: ${origin}`))
+  },
+}))
 app.use(express.json({ limit: '2mb' }))
 app.use('/api', createRouter(ingestion, orchestrator, memory))
 app.use((_request, response) => response.status(404).json({ ok: false, error: 'Not found' }))
