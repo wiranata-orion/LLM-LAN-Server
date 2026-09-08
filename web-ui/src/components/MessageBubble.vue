@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { Bot, User, Copy, Check } from 'lucide-vue-next'
+import hljs from 'highlight.js/lib/common'
 import { ref } from 'vue'
 
 const props = defineProps({
@@ -9,12 +10,17 @@ const props = defineProps({
     required: true,
     // { role: 'user' | 'assistant', content: string }
   },
+  isGenerating: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 const copied = ref(false)
 
 const isUser = computed(() => props.message.role === 'user')
 const isAssistant = computed(() => props.message.role === 'assistant')
+const isThinking = computed(() => isAssistant.value && props.isGenerating && !props.message.content)
 
 function renderMarkdown(text) {
   if (!text) return ''
@@ -24,14 +30,15 @@ function renderMarkdown(text) {
   // ---- Code blocks: extract and protect first ----
   const codeBlocks = []
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    const safeCode = code.trim()
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
     const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`
-    codeBlocks.push(
-      `<div class="code-card"><div class="code-header"><span class="code-lang">${lang || 'code'}</span><button class="copy-code-btn" data-code="${safeCode.replace(/"/g, '&quot;')}" onclick="copyCode(this.dataset.code)">Copy</button></div><pre><code class="language-${lang}">${safeCode}</code></pre></div>`
-    )
+    codeBlocks.push(createCodeBlock(lang, code))
+    return placeholder
+  })
+
+  // Render an unfinished code block while the response is still streaming.
+  html = html.replace(/```(\w*)\n([\s\S]*)$/g, (_, lang, code) => {
+    const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`
+    codeBlocks.push(createCodeBlock(lang, code))
     return placeholder
   })
 
@@ -132,6 +139,28 @@ function renderMarkdown(text) {
     .join('\n')
 
   return html
+}
+
+function createCodeBlock(lang, code) {
+  const cleanCode = code.trim()
+  const safeCode = escapeHtml(cleanCode)
+  let highlightedCode = safeCode
+
+  if (lang && hljs.getLanguage(lang)) {
+    highlightedCode = hljs.highlight(cleanCode, {
+      language: lang,
+      ignoreIllegals: true,
+    }).value
+  }
+
+  return `<div class="code-card"><div class="code-header"><span class="code-lang">${lang || 'code'}</span><button class="copy-code-btn" data-code="${safeCode.replace(/"/g, '&quot;')}" onclick="copyCode(this.dataset.code)">Copy</button></div><pre><code class="language-${lang} hljs">${highlightedCode}</code></pre></div>`
+}
+
+function escapeHtml(value) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 // ---- Process nested lists ----
@@ -340,8 +369,12 @@ window.copyCode = copyCode
         {{ message.content }}
       </div>
 
+      <div v-if="isThinking" class="thinking-indicator" aria-label="Thinking">
+        <span>Thinking</span><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      </div>
+
       <div
-        v-else
+        v-else-if="isAssistant"
         class="message-bubble message-bubble--assistant markdown-body"
         v-html="renderMarkdown(message.content)"
       ></div>
@@ -433,6 +466,47 @@ window.copyCode = copyCode
   color: var(--color-ai-bubble-text);
 }
 
+.thinking-indicator {
+  display: inline-flex;
+  align-items: baseline;
+  color: var(--color-text-muted);
+  font-size: 0.925rem;
+  line-height: 1.7;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 3px;
+}
+
+.thinking-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinkingPulse 1.2s infinite ease-in-out;
+}
+
+.thinking-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes thinkingPulse {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
 .message-actions {
   display: flex;
   gap: 8px;
@@ -500,6 +574,39 @@ window.copyCode = copyCode
 
 .copy-code-btn:hover {
   color: var(--color-text-primary);
+}
+
+/* Syntax highlighting tokens */
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-literal,
+.markdown-body .hljs-type {
+  color: #c084fc;
+}
+
+.markdown-body .hljs-string,
+.markdown-body .hljs-title,
+.markdown-body .hljs-section,
+.markdown-body .hljs-attribute {
+  color: #86efac;
+}
+
+.markdown-body .hljs-number,
+.markdown-body .hljs-variable,
+.markdown-body .hljs-template-variable {
+  color: #fbbf24;
+}
+
+.markdown-body .hljs-comment,
+.markdown-body .hljs-quote {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.markdown-body .hljs-built_in,
+.markdown-body .hljs-symbol,
+.markdown-body .hljs-bullet {
+  color: #67e8f9;
 }
 
 /* ===== List styling (nested) ===== */

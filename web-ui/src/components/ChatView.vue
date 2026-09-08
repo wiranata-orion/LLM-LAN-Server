@@ -117,22 +117,24 @@ function emitRegenerate() {
 
       <!-- Messages -->
       <template v-else>
-        <div class="message-row" v-for="(msg, i) in messages" :key="i">
-          <MessageBubble :message="msg" />
-          
-          <div v-if="msg.role === 'assistant'" class="message-actions">
-            <button class="action-btn" @click="copyContent(msg.content)" :title="copied ? 'Copied!' : 'Copy response'">
-              <Check v-if="copied" :size="14" />
-              <Copy v-else :size="14" />
-              <span>{{ copied ? 'Copied' : 'Copy' }}</span>
-            </button>
-            <button v-if="i === messages.length - 1" class="action-btn" @click="emitRegenerate" title="Regenerate response" :disabled="isGenerating" :class="{ 'action-btn--disabled': isGenerating }">
-              <RefreshCw :size="14" />
-              <span>Regenerate</span>
-            </button>
-            <span class="model-label" v-if="msg.model">{{ msg.model }}</span>
+        <template v-for="(msg, i) in messages" :key="i">
+          <div class="message-item">
+            <MessageBubble :message="msg" :is-generating="isGenerating" />
+
+            <div v-if="msg.role === 'assistant'" class="message-actions">
+              <button class="action-btn" @click="copyContent(msg.content)" :title="copied ? 'Copied!' : 'Copy response'">
+                <Check v-if="copied" :size="14" />
+                <Copy v-else :size="14" />
+                <span>{{ copied ? 'Copied' : 'Copy' }}</span>
+              </button>
+              <button v-if="i === messages.length - 1" class="action-btn" @click="emitRegenerate" title="Regenerate response" :disabled="isGenerating" :class="{ 'action-btn--disabled': isGenerating }">
+                <RefreshCw :size="14" />
+                <span>Regenerate</span>
+              </button>
+              <span class="model-label" v-if="msg.model">{{ msg.model }}</span>
+            </div>
           </div>
-        </div>
+        </template>
 
         <!-- Typing Indicator -->
         <div v-if="showPlaceholder" class="placeholder-bubble"></div>
@@ -273,11 +275,7 @@ function emitRegenerate() {
   line-height: 1.4;
 }
 
-.message-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 24px 28px;
+.message-item {
   max-width: 860px;
   margin: 0 auto;
   width: 100%;
@@ -287,7 +285,14 @@ function emitRegenerate() {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-left: 12px;
+  padding: 0 24px 12px 68px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.message-item:hover .message-actions,
+.message-item:focus-within .message-actions {
+  opacity: 1;
 }
 
 .action-btn {

@@ -368,9 +368,6 @@ onUnmounted(() => {
     <!-- Header -->
     <div class="sidebar-header">
       <div class="sidebar-brand">
-        <div class="brand-icon">
-          <Bot :size="18" />
-        </div>
         <span class="brand-text">Xufruz LLM</span>
       </div>
       <button class="icon-btn" @click="$emit('toggle-sidebar')" title="Close sidebar" id="close-sidebar-btn">
