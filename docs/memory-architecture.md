@@ -79,7 +79,7 @@ Ini berarti, ketika folder penyimpanan tidak dipilih, UI tetap bisa menyimpan in
 
 ## Praktik terbaik
 
-- jangan menghapus `memory_core.sqlite` secara sembarangan jika Anda ingin menjaga memori
+- jangan menghapus `memory_core.sqlite` secara sembarangan jika  ingin menjaga memori
 - jika ingin reset memori, baru hapus file data dan mulai percakapan baru
 - gunakan `conversationId` secara konsisten agar sesi tetap terisolasi
 

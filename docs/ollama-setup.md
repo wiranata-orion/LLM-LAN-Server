@@ -4,7 +4,7 @@ Dokumen ini menjelaskan cara menyiapkan Ollama agar server agent bisa berjalan d
 
 ## Langkah 1: Instal Ollama
 
-Unduh dan install Ollama sesuai sistem operasi Anda. Setelah terinstall, jalankan:
+Unduh dan install Ollama sesuai sistem operasi . Setelah terinstall, jalankan:
 
 ```bash
 ollama serve
@@ -18,7 +18,7 @@ Pilih model yang cocok untuk percakapan. Contoh:
 ollama pull llama3.2:latest
 ```
 
-Anda juga bisa memakai model lain yang tersedia di Ollama, seperti Qwen, Mistral, atau model lokal lainnya.
+ juga bisa memakai model lain yang tersedia di Ollama, seperti Qwen, Mistral, atau model lokal lainnya.
 
 ## Langkah 3: Pull model embedding
 

@@ -23,7 +23,7 @@ Buka pengaturan jaringan dan ubah konfigurasi IPv4 ke:
 
 ## 2. Layanan Ollama
 
-Pastikan `ollama serve` berjalan secara permanen. Jika Anda memakai Windows, bisa diatur agar layanan berjalan otomatis saat start-up.
+Pastikan `ollama serve` berjalan secara permanen. Jika  memakai Windows, bisa diatur agar layanan berjalan otomatis saat start-up.
 
 ## 3. CORS dan origin frontend
 

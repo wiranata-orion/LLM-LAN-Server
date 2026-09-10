@@ -1,6 +1,6 @@
 # Persiapan Perangkat Keras
 
-Dokumen ini membantu Anda memilih spesifikasi perangkat keras yang cocok untuk menjalankan model lokal dengan Ollama.
+Dokumen ini membantu  memilih spesifikasi perangkat keras yang cocok untuk menjalankan model lokal dengan Ollama.
 
 ## Ringkasan cepat
 
@@ -9,7 +9,7 @@ Untuk penggunaan umum, biasanya cukup dengan:
 - CPU modern dengan 8+ core
 - RAM minimal 16 GB
 - SSD NVMe atau SSD SATA yang cepat
-- GPU NVIDIA dengan VRAM cukup jika Anda ingin performa lebih tinggi
+- GPU NVIDIA dengan VRAM cukup jika  ingin performa lebih tinggi
 
 ## Pilihan deployment
 
@@ -52,14 +52,14 @@ Rekomendasi:
 
 - RAM 32 GB
 - CPU kuat atau GPU yang tersedia
-- penyimpanan yang andal dan berkapasitas cukup
+- penyimpanan yang l dan berkapasitas cukup
 
 ## Model yang cocok
 
 - Model chat kecil: `llama3.2:latest`, `qwen2.5`, `mistral`
 - Model embedding: `nomic-embed-text:latest`
 
-Ukuran model akan memengaruhi kebutuhan RAM dan ruang penyimpanan. Jika model terlalu besar untuk perangkat Anda, pilih model yang lebih kecil.
+Ukuran model akan memengaruhi kebutuhan RAM dan ruang penyimpanan. Jika model terlalu besar untuk perangkat , pilih model yang lebih kecil.
 
 ## Tips performa
 
@@ -70,7 +70,7 @@ Ukuran model akan memengaruhi kebutuhan RAM dan ruang penyimpanan. Jika model te
 
 ## Tips pendinginan
 
-Jika Anda menjalankan model besar di komputer rumah:
+Jika  menjalankan model besar di komputer rumah:
 
 - pastikan ventilasi cukup
 - monitor suhu CPU dan GPU

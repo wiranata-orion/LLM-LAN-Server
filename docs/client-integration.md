@@ -114,7 +114,7 @@ curl -X POST http://127.0.0.1:8787/api/memory/import \
 
 ## Struktur percakapan
 
-Gunakan `conversationId` agar satu sesi tetap terpisah dari sesi lain. Ini penting terutama saat Anda ingin memiliki beberapa obrolan yang independen.
+Gunakan `conversationId` agar satu sesi tetap terpisah dari sesi lain. Ini penting terutama saat  ingin memiliki beberapa obrolan yang independen.
 
 ## Catatan penting
 
@@ -127,4 +127,4 @@ Gunakan `conversationId` agar satu sesi tetap terpisah dari sesi lain. Ini penti
 
 - Simpan `conversationId` di sisi client untuk memisahkan tema dan konteks.
 - Gunakan `stream: true` untuk UX yang lebih terasa hidup.
-- Pertahankan `memory_core.sqlite` dan `vector-store.json` jika Anda ingin memindahkan memori antar mesin.
+- Pertahankan `memory_core.sqlite` dan `vector-store.json` jika  ingin memindahkan memori antar mesin.
