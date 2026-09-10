@@ -3,6 +3,8 @@ import { checkEnginePing, getApiUrl } from './api.js'
 const EMBEDDING_MODEL = 'nomic-embed-text'
 const CONVERSATIONS_FOLDER = 'conversations'
 const MAX_RETRIEVED_MEMORIES = 5
+const LOCAL_GLOBAL_MEMORY_KEY = 'llm-global-memory'
+const LOCAL_STATE_KEY = 'llm-chat-state'
 
 let selectedDirectoryHandle = null
 let selectedDirectoryName = ''
@@ -133,7 +135,57 @@ async function deleteJsonFile(directory, fileName) {
   }
 }
 
+function readLocalState() {
+  try {
+    const saved = localStorage.getItem(LOCAL_STATE_KEY)
+    if (!saved) return {}
+    return JSON.parse(saved)
+  } catch (error) {
+    console.warn('Failed to read local chat state for memory fallback:', error)
+    return {}
+  }
+}
+
+function readLocalGlobalMemory() {
+  try {
+    const saved = localStorage.getItem(LOCAL_GLOBAL_MEMORY_KEY)
+    if (!saved) {
+      return {
+        profile: {},
+        preferences: {},
+        permanent_instructions: [],
+        interactions: [],
+      }
+    }
+    const parsed = JSON.parse(saved)
+    return {
+      profile: parsed.profile || {},
+      preferences: parsed.preferences || {},
+      permanent_instructions: Array.isArray(parsed.permanent_instructions) ? parsed.permanent_instructions : [],
+      interactions: Array.isArray(parsed.interactions) ? parsed.interactions : [],
+    }
+  } catch (error) {
+    console.warn('Failed to parse local global memory:', error)
+    return {
+      profile: {},
+      preferences: {},
+      permanent_instructions: [],
+      interactions: [],
+    }
+  }
+}
+
+function writeLocalGlobalMemory(memory) {
+  localStorage.setItem(LOCAL_GLOBAL_MEMORY_KEY, JSON.stringify(memory))
+}
+
 async function readGlobalMemory(root) {
+  if (!root) {
+    const localMemory = readLocalGlobalMemory()
+    cachedGlobalMemory = localMemory
+    return localMemory
+  }
+
   const storedMemory = await readJsonFile(root, 'global_memory.json')
   if (storedMemory) {
     cachedGlobalMemory = storedMemory
@@ -143,6 +195,7 @@ async function readGlobalMemory(root) {
     profile: {},
     preferences: {},
     permanent_instructions: [],
+    interactions: [],
   }
 }
 
@@ -213,8 +266,26 @@ async function listConversationFiles(directory) {
 }
 
 export async function retrieveRelevantMemories(query, model, limit = MAX_RETRIEVED_MEMORIES) {
+  if (!query.trim()) return []
+
   const directories = await getMemoryRoot(model)
-  if (!directories || !query.trim()) return []
+  let conversations = []
+
+  if (directories) {
+    const files = await listConversationFiles(directories.conversations)
+    for (const fileName of files) {
+      const conversation = await readJsonFile(directories.conversations, fileName)
+      if (conversation?.messages?.length) {
+        conversations.push({ fileName, conversation })
+      }
+    }
+  } else {
+    const state = readLocalState()
+    conversations = (state.conversations || []).map((conversation) => ({
+      fileName: conversation.id,
+      conversation,
+    }))
+  }
 
   let queryEmbedding = null
   try {
@@ -224,10 +295,7 @@ export async function retrieveRelevantMemories(query, model, limit = MAX_RETRIEV
   }
 
   const results = []
-  for (const fileName of await listConversationFiles(directories.conversations)) {
-    const conversation = await readJsonFile(directories.conversations, fileName)
-    if (!conversation?.messages?.length) continue
-
+  for (const { fileName, conversation } of conversations) {
     const text = conversation.messages
       .filter((message) => message.content)
       .map((message) => `${message.role}: ${message.content}`)
@@ -235,7 +303,7 @@ export async function retrieveRelevantMemories(query, model, limit = MAX_RETRIEV
     if (!text) continue
 
     let embedding = conversation.embedding
-    if (queryEmbedding && (!Array.isArray(embedding) || !embedding.length)) {
+    if (directories && queryEmbedding && (!Array.isArray(embedding) || !embedding.length)) {
       try {
         embedding = await createEmbedding(text)
         conversation.embedding = embedding
@@ -259,10 +327,9 @@ export async function retrieveRelevantMemories(query, model, limit = MAX_RETRIEV
 export async function buildMemoryMessages({ query, model }) {
   try {
     const directories = await getMemoryRoot(model)
-    if (!directories) return []
 
     const messages = []
-    const globalMemory = await readGlobalMemory(directories.root)
+    const globalMemory = await readGlobalMemory(directories?.root || null)
     const globalText = globalMemoryToText(globalMemory)
     if (globalText) {
       messages.push({
@@ -290,7 +357,23 @@ export async function saveConversation(conversation, model) {
   // Do not let a separate health endpoint block archiving the completed chat.
   const directories = await getMemoryRoot(model, { requireConnection: false })
   if (!conversation?.id) throw new Error('Conversation ID is missing')
-  if (!directories) throw new Error('Memory folder is not connected or Ollama is offline')
+
+  const currentMemory = await readGlobalMemory(directories?.root || null)
+  const interactions = [
+    ...(currentMemory.interactions || []).filter((item) => item.conversationId !== conversation.id),
+    ...normalizeInteractions(conversation),
+  ].slice(-200)
+  const updatedMemory = {
+    ...currentMemory,
+    interactions,
+    updatedAt: new Date().toISOString(),
+  }
+  cachedGlobalMemory = updatedMemory
+
+  if (!directories) {
+    writeLocalGlobalMemory(updatedMemory)
+    return true
+  }
 
   const fileName = await getConversationFileName(directories.conversations, conversation)
   const messages = conversation.messages || []
@@ -305,17 +388,6 @@ export async function saveConversation(conversation, model) {
     embedding: null,
   })
 
-  const currentMemory = await readGlobalMemory(directories.root)
-  const interactions = [
-    ...(currentMemory.interactions || []).filter((item) => item.conversationId !== conversation.id),
-    ...normalizeInteractions(conversation),
-  ].slice(-200)
-  const updatedMemory = {
-    ...currentMemory,
-    interactions,
-    updatedAt: new Date().toISOString(),
-  }
-  cachedGlobalMemory = updatedMemory
   await writeJsonFile(directories.root, 'global_memory.json', updatedMemory)
   console.info(`Conversation memory saved: ${fileName}`)
   return true
@@ -323,7 +395,21 @@ export async function saveConversation(conversation, model) {
 
 export async function deleteConversation(conversation, model) {
   const directories = await getMemoryRoot(model, { requireConnection: false })
-  if (!directories || !conversation?.id) return false
+  if (!conversation?.id) return false
+
+  if (!directories) {
+    const currentMemory = readLocalGlobalMemory()
+    const interactions = (currentMemory.interactions || [])
+      .filter((item) => item.conversationId !== conversation.id)
+    const updatedMemory = {
+      ...currentMemory,
+      interactions,
+      updatedAt: new Date().toISOString(),
+    }
+    writeLocalGlobalMemory(updatedMemory)
+    cachedGlobalMemory = updatedMemory
+    return true
+  }
 
   for (const fileName of await listConversationFiles(directories.conversations)) {
     const stored = await readJsonFile(directories.conversations, fileName)
@@ -365,14 +451,19 @@ async function getConversationFileName(directory, conversation) {
 }
 
 export async function saveGlobalMemory(memory, model) {
-  const directories = await getMemoryRoot(model)
-  if (!directories) return false
+  const directories = await getMemoryRoot(model, { requireConnection: false })
   const updatedMemory = {
     permanent_instructions: memory?.permanent_instructions || [],
     interactions: memory?.interactions || [],
     updatedAt: new Date().toISOString(),
   }
   cachedGlobalMemory = updatedMemory
+
+  if (!directories) {
+    writeLocalGlobalMemory(updatedMemory)
+    return true
+  }
+
   await writeJsonFile(directories.root, 'global_memory.json', updatedMemory)
   return true
 }

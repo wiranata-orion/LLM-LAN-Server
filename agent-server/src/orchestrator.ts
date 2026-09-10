@@ -23,16 +23,16 @@ export class AgentOrchestrator {
 
     const memoryResults = latestUserMessage ? await this.memory.search(latestUserMessage.content) : []
     const retrieved = latestUserMessage ? await this.retriever.search(latestUserMessage.content) : []
-    const coreProfile = await this.memory.getCoreProfile()
+    const memoryState = latestUserMessage ? await this.memory.getLayerSnapshot(conversationId) : await this.memory.getLayerSnapshot(conversationId)
 
-    // 1. Didefinisikan variabel context biar gak error "Cannot find name 'context'"
     const context = retrieved.length
       ? `Retrieved local context:\n${retrieved.map((item) => `[${item.source}]\n${item.content}`).join('\n\n')}`
       : ''
 
     const memoryContext = [
-      coreProfile ? `Core User Profile:\n${coreProfile}` : '',
-      memoryResults.length ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}`).join('\n')}` : ''
+      memoryState.rollingSummary ? `Session Summary:\n${memoryState.rollingSummary}` : '',
+      memoryState.facts.length ? `Structured Facts:\n${memoryState.facts.map((fact) => `${fact.key}: ${fact.value}`).join('\n')}` : '',
+      memoryResults.length ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}`).join('\n')}` : '',
     ].filter(Boolean).join('\n\n')
 
     const messages: ChatMessage[] = [
@@ -78,16 +78,16 @@ export class AgentOrchestrator {
 
     const memoryResults = latestUserMessage ? await this.memory.search(latestUserMessage.content) : []
     const retrieved = latestUserMessage ? await this.retriever.search(latestUserMessage.content) : []
-    const coreProfile = await this.memory.getCoreProfile()
+    const memoryState = latestUserMessage ? await this.memory.getLayerSnapshot(conversationId) : await this.memory.getLayerSnapshot(conversationId)
 
     const context = retrieved.length
       ? `Retrieved local context:\n${retrieved.map((item) => `[${item.source}]\n${item.content}`).join('\n\n')}`
       : ''
 
-    // 2. Disamakan juga logika memoryContext untuk streaming
     const memoryContext = [
-      coreProfile ? `Core User Profile:\n${coreProfile}` : '',
-      memoryResults.length ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}`).join('\n')}` : ''
+      memoryState.rollingSummary ? `Session Summary:\n${memoryState.rollingSummary}` : '',
+      memoryState.facts.length ? `Structured Facts:\n${memoryState.facts.map((fact) => `${fact.key}: ${fact.value}`).join('\n')}` : '',
+      memoryResults.length ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}`).join('\n')}` : '',
     ].filter(Boolean).join('\n\n')
 
     const messages: ChatMessage[] = [

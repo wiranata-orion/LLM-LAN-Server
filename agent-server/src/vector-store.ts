@@ -52,6 +52,11 @@ export class JsonVectorStore {
     await this.persist()
   }
 
+  async count(): Promise<number> {
+    await this.load()
+    return this.records.length
+  }
+
   async search(queryEmbedding: number[], limit: number, minScore: number): Promise<Array<VectorRecord & { score: number }>> {
     await this.load()
     return this.records

@@ -62,16 +62,25 @@ export function createRouter(ingestion: IngestionService, orchestrator: AgentOrc
         response.setHeader('Connection', 'keep-alive')
         response.flushHeaders()
 
-        const result = await orchestrator.runStream(
-          body.messages as ChatMessage[],
-          body.model,
-          body.conversationId || 'default',
-          (content) => response.write(`${JSON.stringify({ type: 'token', content })}\n`),
-        )
-        response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks })}\n`)
-        response.write(`${JSON.stringify({ type: 'done' })}\n`)
-        response.end()
-        return
+        try {
+          const result = await orchestrator.runStream(
+            body.messages as ChatMessage[],
+            body.model,
+            body.conversationId || 'default',
+            (content) => response.write(`${JSON.stringify({ type: 'token', content })}\n`),
+          )
+          response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks })}\n`)
+          response.write(`${JSON.stringify({ type: 'done' })}\n`)
+          response.end()
+          return
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Agent request failed'
+          if (response.writableEnded) return
+          response.write(`${JSON.stringify({ type: 'error', content: message })}\n`)
+          response.write(`${JSON.stringify({ type: 'done' })}\n`)
+          response.end()
+          return
+        }
       }
 
       const result = await orchestrator.run(body.messages as ChatMessage[], body.model, body.conversationId || 'default')
@@ -83,6 +92,15 @@ export function createRouter(ingestion: IngestionService, orchestrator: AgentOrc
       })
     } catch (error) {
       response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Agent request failed' })
+    }
+  })
+
+  router.get('/memory/layers', async (request, response) => {
+    try {
+      const sessionId = String(request.query.sessionId || 'default')
+      response.json(await memory.getLayerSnapshot(sessionId))
+    } catch (error) {
+      response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Memory layer snapshot failed' })
     }
   })
 

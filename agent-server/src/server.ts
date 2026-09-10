@@ -15,7 +15,15 @@ const ingestion = new IngestionService(store)
 const retriever = new Retriever(store)
 const orchestrator = new AgentOrchestrator(retriever, memory)
 
-app.use(cors({ origin: config.corsOrigin === '*' ? true : config.corsOrigin }))
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || config.corsOrigins.includes(origin) || config.corsOrigin === '*') {
+      callback(null, true)
+      return
+    }
+    callback(null, false)
+  },
+}))
 app.use(express.json({ limit: '2mb' }))
 app.use('/api', createRouter(ingestion, orchestrator, memory))
 app.use((_request, response) => response.status(404).json({ ok: false, error: 'Not found' }))
