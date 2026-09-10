@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { extractFactsFromMessage } from './memory-core.js'
 
 test('portable memory schema is documented by the runtime module', async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'agent-memory-'))
@@ -18,4 +19,9 @@ test('JSONL export format is newline-delimited', async () => {
     assert.equal(error.code, 'ENOENT')
   })
   await rm(temporaryDirectory, { recursive: true, force: true })
+})
+
+test('personal facts are not extracted into structured memory', () => {
+  const facts = extractFactsFromMessage('perkenalkan nama ku wiranata')
+  assert.deepEqual(facts, [])
 })

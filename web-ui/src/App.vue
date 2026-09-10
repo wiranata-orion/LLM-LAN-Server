@@ -12,9 +12,7 @@ import {
   loadStoredFolders,
   saveConversation,
   saveStoredFolders,
-  restoreMemoryDirectoryHandle,
-  setMemoryDirectoryHandle,
-  requestMemoryDirectoryPermission,
+  buildMemoryMessages,
 } from './services/memory.js'
 
 // ===== State =====
@@ -345,12 +343,18 @@ async function generateAssistantResponse() {
 
   const latestUserMessage = conversationMessages[conversationMessages.length - 1]
   const history = conversationMessages.slice(0, -1)
+  const memoryMessages = latestUserMessage?.content
+    ? await buildMemoryMessages({
+        query: latestUserMessage.content,
+        model: selectedModel.value,
+      })
+    : []
 
   abortController = new AbortController()
   try {
     await sendAgentMessageStream(
       latestUserMessage?.content || '',
-      history,
+      [...memoryMessages, ...history],
       selectedModel.value,
       abortController.signal,
       conv.id,
