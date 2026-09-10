@@ -1,36 +1,51 @@
 # Local LLM Agent Server
 
-Backend Node.js + TypeScript untuk Agentic RAG dan tool calling di atas Ollama.
+Backend Node.js + TypeScript ini berfungsi sebagai server agent lokal yang menghubungkan `web-ui`, Ollama, SQLite, dan vector store lokal untuk kebutuhan chat, retrieval, serta memori percakapan.
 
-## Arsitektur
+## Ringkasan cepat
+
+Server ini menangani:
+
+- chat dengan model lokal melalui Ollama
+- ingest dokumen ke vector store
+- retrieval hybrid (semantic + keyword)
+- penyimpanan raw history ke SQLite
+- ringkasan sesi dan fakta sesi
+- endpoint API untuk frontend dan client lain
+
+## Struktur folder
 
 ```text
 agent-server/
-  src/
-    config.ts              # Validated environment configuration
-    types.ts               # Shared domain contracts
-    ollama.ts              # Ollama chat, embeddings, health client
-    chunker.ts             # Paragraph/sentence-aware chunking
-    vector-store.ts        # Persistent local JSON vector store
-    memory-core.ts         # SQLite raw log + hybrid long-term memory
-    ingestion.ts           # Documents -> chunks -> embeddings
-    retriever.ts           # Similarity search
-    orchestrator.ts        # RAG + tool decision/execution loop
-    routes.ts              # HTTP endpoints and validation
-    server.ts              # Express composition root
-    tools/
-      registry.ts          # JSON tool schemas sent to Ollama
-      executor.ts          # Allowlisted tool handlers
-  data/                    # Created at runtime, ignored by git
-    memory_core.sqlite     # Portable raw conversation database
-    vector-store.json      # Rebuildable semantic index
+├── src/
+│   ├── config.ts              # konfigurasi environment dan validasi
+│   ├── types.ts               # kontrak domain bersama
+│   ├── ollama.ts              # client chat, embedding, dan health check ke Ollama
+│   ├── chunker.ts             # pemecah chunk berdasarkan paragraf dan kalimat
+│   ├── vector-store.ts        # vector store lokal berbasis JSON
+│   ├── memory-core.ts         # SQLite + memori hybrid (raw log, summary, facts)
+│   ├── ingestion.ts           # dokumen -> chunks -> embeddings
+│   ├── retriever.ts           # pencarian similarity
+│   ├── orchestrator.ts        # alur RAG + tool calling
+│   ├── routes.ts              # endpoint HTTP
+│   ├── server.ts              # composition root Express
+│   └── tools/
+│       ├── registry.ts        # definisi tool yang dikirim ke Ollama
+│       └── executor.ts        # handler tool yang diizinkan
+├── data/
+│   ├── memory_core.sqlite     # raw history percakapan
+│   └── vector-store.json      # indeks semantik lokal
+├── package.json
+├── tsconfig.json
+├── README.md
+└── dist/                     # hasil build TypeScript
 ```
 
-The vector store is local JSON, so no hosted vector database credentials are required. Ollama provides both chat and embedding models. The Vue UI calls this server at `http://127.0.0.1:8787/api` by default.
+## Arsitektur kerja
 
-## Portable long-term memory
+### 1. Memori raw SQLite
 
-`data/memory_core.sqlite` is the source of truth for raw conversations. It contains the durable table:
+`data/memory_core.sqlite` adalah sumber utama riwayat percakapan. Tiap chat user dan assistant disimpan secara permanen ke tabel `conversations`.
 
 ```sql
 CREATE TABLE conversations (
@@ -38,89 +53,153 @@ CREATE TABLE conversations (
   timestamp TEXT NOT NULL,
   sender TEXT NOT NULL,
   message TEXT NOT NULL,
-  metadata TEXT NOT NULL
+  metadata TEXT NOT NULL DEFAULT '{}'
 );
 ```
 
-Every `/api/chat` request appends the latest user turn before inference and the final assistant turn after tool execution. The local vector store is a rebuildable acceleration layer; changing the LLM provider does not change the SQLite data.
+### 2. Vector store lokal
 
-Retrieval is hybrid: semantic cosine similarity from Ollama embeddings is combined with exact token overlap. If the embedding model is unavailable, exact keyword retrieval still works.
+`data/vector-store.json` dipakai sebagai indeks semantik untuk pencarian relevan. File ini dapat dibangun ulang kembali dari SQLite, sehingga portable dan tidak bergantung pada layanan vector database pihak ketiga.
 
-## Setup
+### 3. Retrieval hybrid
 
-```powershell
+Server melakukan pencarian dengan kombinasi:
+
+- semantic search menggunakan embedding dari Ollama
+- keyword overlap dari pesan raw
+- ringkasan sesi dan fakta sesi jika tersedia
+
+Jika model embedding tidak tersedia, sistem tetap dapat melakukan retrieval berbasis kata kunci.
+
+### 4. Orchestrator
+
+`orchestrator.ts` melakukan:
+
+1. menambahkan pesan user terbaru ke memori
+2. mencari konteks relevan
+3. membangun prompt sistem + konteks
+4. mengirim permintaan ke Ollama
+5. menjalankan tool bila model mengajukannya
+6. menyimpan response assistant ke memori
+
+## Setup cepat
+
+```bash
 cd agent-server
-Copy-Item .env.example .env
 npm install
 ollama pull llama3.2:latest
 ollama pull nomic-embed-text:latest
 npm run dev
 ```
 
-Set `OLLAMA_CHAT_MODEL` to a chat-capable model installed on your Ollama engine. Do not use `nomic-embed-text` as the chat model.
+Pastikan variabel `OLLAMA_CHAT_MODEL` dan `OLLAMA_EMBED_MODEL` sudah benar di environment.
 
-## API
+## Konfigurasi utama
 
-### Health
+Buat file `.env` berdasarkan environment yang dibutuhkan, lalu atur variabel berikut:
 
-```powershell
+- `OLLAMA_BASE_URL` : URL server Ollama aktif
+- `OLLAMA_CHAT_MODEL` : model chat, misalnya `llama3.2:latest`
+- `OLLAMA_EMBED_MODEL` : model embedding, misalnya `nomic-embed-text:latest`
+- `MEMORY_ROOT` : folder data lokal
+- `VECTOR_STORE_PATH` : lokasi file vector store
+- `MEMORY_DB_PATH` : lokasi file SQLite memori
+- `MAX_RETRIEVED_CHUNKS` : jumlah hasil retrieval maksimal
+- `RAG_MIN_SCORE` : ambang skor retrieval
+- `MAX_TOOL_ROUNDS` : batas aman perulangan tool call
+- `CORS_ORIGIN` : origin frontend yang diizinkan
+
+## Endpoint API
+
+### 1. Health check
+
+```bash
 curl http://127.0.0.1:8787/api/health
 ```
 
-### Ingest documents
+### 2. Ingest dokumen
 
-```powershell
-curl -X POST http://127.0.0.1:8787/api/ingest `
-  -H "Content-Type: application/json" `
-  -d '{"documents":[{"source":"notes/profile.txt","content":"Local LLM deployments use Ollama on a private network.","metadata":{"category":"notes"}}]}'
+```bash
+curl -X POST http://127.0.0.1:8787/api/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "documents": [
+      {
+        "source": "notes/profile.txt",
+        "content": "Deployment LLM lokal berjalan di jaringan privat.",
+        "metadata": { "category": "notes" }
+      }
+    ]
+  }'
 ```
 
-The endpoint chunks each document, creates embeddings with `OLLAMA_EMBED_MODEL`, and persists records in `VECTOR_STORE_PATH`.
+### 3. Chat dengan agent
 
-### Agent chat
-
-```powershell
-curl -X POST http://127.0.0.1:8787/api/chat `
-  -H "Content-Type: application/json" `
-  -d '{"messages":[{"role":"user","content":"What do my local deployment notes say? Calculate (18 + 6) / 3 too."}]}'
+```bash
+curl -X POST http://127.0.0.1:8787/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      { "role": "user", "content": "Apa yang ada di catatan deployment saya?" }
+    ]
+  }'
 ```
 
-The response contains `message`, `toolRounds`, and `retrievedChunks`. The orchestrator sends declared tools to Ollama, executes only registered tools, appends tool results, and asks Ollama for the final answer.
+Body request dapat mencakup:
 
-### Export memory
+- `messages` : daftar pesan chat
+- `conversationId` : ID sesi untuk memisahkan percakapan
+- `model` : model yang dipilih
+- `stream` : bila `true`, server akan mengembalikan stream NDJSON
 
-```powershell
+### 4. Streaming chat
+
+```bash
+curl -N -X POST http://127.0.0.1:8787/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stream": true,
+    "messages": [
+      { "role": "user", "content": "Ringkas catatan deployment saya." }
+    ]
+  }'
+```
+
+### 5. Ekspor memori
+
+```bash
 curl http://127.0.0.1:8787/api/memory/export -o memory.jsonl
 ```
 
-The export is newline-delimited JSON and contains every SQLite conversation row, including metadata.
+### 6. Impor memori
 
-### Import memory on another machine
-
-```powershell
-curl -X POST http://127.0.0.1:8787/api/memory/import `
-  -H "Content-Type: application/jsonl" `
-  --data-binary "@memory.jsonl"
+```bash
+curl -X POST http://127.0.0.1:8787/api/memory/import \
+  -H "Content-Type: application/jsonl" \
+  --data-binary @memory.jsonl
 ```
 
-Import is idempotent by record ID and regenerates semantic vectors when `nomic-embed-text` is available. Copying `memory_core.sqlite` directly is also supported when SQLite versions and filesystem permissions are compatible.
+## Perilaku memori
 
-## Configuration
+Server ini menyimpan semua input dari user dan output assistant ke SQLite. Itu artinya:
 
-Copy `.env.example` to `.env` and adjust:
+- riwayat obrolan tetap tersimpan secara lokal
+- retriever dapat mencari konteks lama saat chat baru datang
+- sesi yang berbeda dapat dipisahkan dengan `conversationId`
 
-- `OLLAMA_BASE_URL`: active Ollama server.
-- `OLLAMA_CHAT_MODEL`: chat-capable model.
-- `OLLAMA_EMBED_MODEL`: embedding model, normally `nomic-embed-text:latest`.
-- `MEMORY_ROOT`: reserved local data root.
-- `VECTOR_STORE_PATH`: persistent vector JSON path.
-- `MAX_RETRIEVED_CHUNKS` and `RAG_MIN_SCORE`: retrieval controls.
-- `MAX_TOOL_ROUNDS`: loop safety limit.
-- `CORS_ORIGIN`: allowed frontend origin.
+## Validasi dan build
 
-## Validation
-
-```powershell
+```bash
 npm run typecheck
 npm run build
 ```
+
+## Dokumen terkait
+
+- [README utama](../README.md)
+- [README web-ui](../web-ui/README.md)
+- [docs/client-integration.md](../docs/client-integration.md)
+- [docs/memory-architecture.md](../docs/memory-architecture.md)
+- [docs/ollama-setup.md](../docs/ollama-setup.md)
+- [docs/os-network-config.md](../docs/os-network-config.md)
+- [docs/universal-central-memory.md](../docs/universal-central-memory.md)
