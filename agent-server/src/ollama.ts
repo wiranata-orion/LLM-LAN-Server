@@ -1,5 +1,5 @@
 import { config } from './config.js'
-import type { ChatMessage, OllamaChatResponse, ToolDefinition } from './types.js'
+import type { ChatMessage, ChatOptions, OllamaChatResponse, ToolDefinition } from './types.js'
 
 interface OllamaGenerateEmbeddingResponse {
   embedding?: number[]
@@ -24,12 +24,13 @@ async function parseError(response: Response): Promise<never> {
   throw new OllamaError(`Ollama request failed (${response.status}): ${body || response.statusText}`, response.status)
 }
 
-async function supportsTools(model: string): Promise<boolean> {
-  const cached = toolSupportCache.get(model)
+async function supportsTools(model: string, baseUrl: string): Promise<boolean> {
+  const cacheKey = `${baseUrl}::${model}`
+  const cached = toolSupportCache.get(cacheKey)
   if (cached !== undefined) return cached
 
   try {
-    const response = await fetch(`${config.ollamaBaseUrl}/api/show`, {
+    const response = await fetch(`${baseUrl}/api/show`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model }),
@@ -37,7 +38,7 @@ async function supportsTools(model: string): Promise<boolean> {
     if (!response.ok) return false
     const payload = await response.json() as OllamaShowResponse
     const supported = payload.capabilities?.includes('tools') ?? false
-    toolSupportCache.set(model, supported)
+    toolSupportCache.set(cacheKey, supported)
     return supported
   } catch {
     return false
@@ -49,15 +50,19 @@ async function requestChat(
   tools: ToolDefinition[],
   model: string,
   stream: boolean,
+  options?: ChatOptions,
+  baseUrl: string = config.ollamaBaseUrl,
 ): Promise<Response> {
-  const canUseTools = tools.length > 0 && await supportsTools(model)
-  const createRequest = (includeTools: boolean) => fetch(`${config.ollamaBaseUrl}/api/chat`, {
+  const canUseTools = tools.length > 0 && await supportsTools(model, baseUrl)
+  const hasOptions = options && Object.values(options).some((value) => value !== undefined && value !== null && value !== '')
+  const createRequest = (includeTools: boolean) => fetch(`${baseUrl}/api/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       model,
       messages,
       ...(includeTools ? { tools } : {}),
+      ...(hasOptions ? { options } : {}),
       stream,
     }),
   })
@@ -66,7 +71,7 @@ async function requestChat(
   if (!response.ok && canUseTools && response.status === 400) {
     const body = await response.clone().text().catch(() => '')
     if (/tools?|function calling|does not support/i.test(body)) {
-      toolSupportCache.set(model, false)
+      toolSupportCache.set(`${baseUrl}::${model}`, false)
       response = await createRequest(false)
     }
   }
@@ -90,8 +95,10 @@ export async function chat(
   messages: ChatMessage[],
   tools: ToolDefinition[],
   model = config.chatModel,
+  options?: ChatOptions,
+  baseUrl?: string,
 ): Promise<OllamaChatResponse> {
-  const response = await requestChat(messages, tools, model, false)
+  const response = await requestChat(messages, tools, model, false, options, baseUrl)
   if (!response.ok) await parseError(response)
   const payload = await response.json() as OllamaChatResponse
   if (!payload.message) throw new OllamaError('Ollama returned no assistant message')
@@ -103,8 +110,10 @@ export async function chatStream(
   tools: ToolDefinition[],
   model: string,
   onToken: (content: string) => void,
+  options?: ChatOptions,
+  baseUrl?: string,
 ): Promise<OllamaChatResponse> {
-  const response = await requestChat(messages, tools, model, true)
+  const response = await requestChat(messages, tools, model, true, options, baseUrl)
   if (!response.ok) await parseError(response)
   if (!response.body) throw new OllamaError('Ollama returned no stream body')
 

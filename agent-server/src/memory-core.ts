@@ -6,7 +6,7 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { config } from './config.js'
 import { embed } from './ollama.js'
-import { JsonVectorStore } from './vector-store.js'
+import { VectorStore } from './vector-store.js'
 import type { ChatMessage, VectorRecord } from './types.js'
 
 export interface MemoryRecord {
@@ -41,7 +41,12 @@ export interface MemorySearchResult extends MemoryRecord {
 
 export interface MemoryCore {
   appendMessage(sender: string, message: string, metadata?: Record<string, unknown>): Promise<MemoryRecord>
-  search(query: string): Promise<MemorySearchResult[]>
+  /**
+   * @param queryEmbedding Pass a precomputed embedding to skip a redundant embedding call when the caller already has one.
+   * @param excludeId Exclude a specific record (typically the message just appended for this same turn) from results,
+   * so the question being asked right now doesn't show up as "relevant memory" of itself.
+   */
+  search(query: string, queryEmbedding?: number[] | null, excludeId?: string): Promise<MemorySearchResult[]>
   getCoreProfile(): Promise<string>
   getLayerSnapshot(sessionId: string): Promise<MemoryLayerSnapshot>
   exportJsonl(outputPath: string): Promise<void>
@@ -100,6 +105,7 @@ export class SqliteMemoryCore implements MemoryCore {
   private readonly database: Database.Database
   private readonly insertStatement: Database.Statement
   private readonly selectAllStatement: Database.Statement
+  private readonly selectRecentForSearchStatement: Database.Statement
   private readonly selectSessionMessagesStatement: Database.Statement
   private readonly countSessionMessagesStatement: Database.Statement
   private readonly selectSessionSummaryStatement: Database.Statement
@@ -107,7 +113,7 @@ export class SqliteMemoryCore implements MemoryCore {
   private readonly selectSessionFactsStatement: Database.Statement
   private readonly upsertFactStatement: Database.Statement
 
-  constructor(private readonly vectorStore: JsonVectorStore) {
+  constructor(private readonly vectorStore: VectorStore) {
     mkdirSync(path.dirname(config.memoryDbPath), { recursive: true })
     this.database = new Database(config.memoryDbPath)
     this.database.pragma('journal_mode = WAL')
@@ -157,6 +163,13 @@ export class SqliteMemoryCore implements MemoryCore {
     `)
     this.selectAllStatement = this.database.prepare(
       'SELECT id, session_id, timestamp, sender, message, metadata FROM conversations ORDER BY timestamp ASC',
+    )
+    // Cross-conversation recall (see docs/universal-central-memory.md) intentionally
+    // searches beyond the current session, but scanning every message ever stored on
+    // every single request does not scale as history grows. Bound it to the most
+    // recent window instead - relevant memories are overwhelmingly recent in practice.
+    this.selectRecentForSearchStatement = this.database.prepare(
+      'SELECT id, session_id, timestamp, sender, message, metadata FROM conversations ORDER BY timestamp DESC LIMIT ?',
     )
     this.selectSessionMessagesStatement = this.database.prepare(
       'SELECT id, session_id, timestamp, sender, message, metadata FROM conversations WHERE session_id = ? ORDER BY timestamp ASC',
@@ -222,18 +235,26 @@ export class SqliteMemoryCore implements MemoryCore {
     return record
   }
 
-  async search(query: string): Promise<MemorySearchResult[]> {
+  async search(query: string, precomputedEmbedding?: number[] | null, excludeId?: string): Promise<MemorySearchResult[]> {
     if (!query.trim()) return []
-    const rows = this.selectAllStatement.all() as Record<string, unknown>[]
-    let queryEmbedding: number[] | null = null
-    try {
-      queryEmbedding = await embed(query)
-    } catch (error) {
-      console.warn('Memory semantic search unavailable; using exact keyword search:', error)
+    const rows = (this.selectRecentForSearchStatement.all(config.memorySearchScanLimit) as Record<string, unknown>[])
+      .filter((row) => !excludeId || String(row.id) !== excludeId)
+
+    let queryEmbedding: number[] | null | undefined = precomputedEmbedding
+    if (queryEmbedding === undefined) {
+      try {
+        queryEmbedding = await embed(query)
+      } catch (error) {
+        console.warn('Memory semantic search unavailable; using exact keyword search:', error)
+        queryEmbedding = null
+      }
     }
 
+    // Only the conversation vectors we might actually use are relevant here; asking
+    // the vector store for literally every record (including ingested documents) and
+    // an unbounded limit wastes work on a growing store.
     const vectorResults = queryEmbedding
-      ? await this.vectorStore.search(queryEmbedding, rows.length, -1)
+      ? await this.vectorStore.search(queryEmbedding, Math.max(config.maxRetrievedChunks * 8, 50), 0)
       : []
     const semanticById = new Map(vectorResults.map((item) => [item.id, item.score]))
     return rows

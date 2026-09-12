@@ -2,11 +2,11 @@ import { readFile } from 'node:fs/promises'
 import crypto from 'node:crypto'
 import { chunkText } from './chunker.js'
 import { embed } from './ollama.js'
-import { JsonVectorStore } from './vector-store.js'
+import { VectorStore } from './vector-store.js'
 import type { DocumentInput, VectorRecord } from './types.js'
 
 export class IngestionService {
-  constructor(private readonly store: JsonVectorStore) {}
+  constructor(private readonly store: VectorStore) {}
 
   async ingest(documents: DocumentInput[]): Promise<{ documents: number; chunks: number }> {
     const records: VectorRecord[] = []
