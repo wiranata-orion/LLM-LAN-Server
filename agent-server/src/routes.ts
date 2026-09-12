@@ -94,6 +94,26 @@ export function createRouter(context: AppContext): Router {
     }
   })
 
+  // What is actually in the RAG store and feeding "Retrieved local context".
+  // Without this there was no way to see - let alone remove - a document that
+  // shouldn't have been ingested.
+  router.get('/documents', async (_request, response) => {
+    try {
+      response.json({ ok: true, documents: await context.current.store.listDocumentSources() })
+    } catch (error) {
+      response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Failed to list documents' })
+    }
+  })
+
+  router.delete('/documents/:source', async (request, response) => {
+    try {
+      const removed = await context.current.store.deleteBySource(request.params.source)
+      response.json({ ok: true, removed })
+    } catch (error) {
+      response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Failed to delete document' })
+    }
+  })
+
   router.post('/chat', async (request, response) => {
     // Cancels the actual upstream Ollama request the moment the client
     // disconnects (e.g. the Stop button), instead of leaving Ollama to keep

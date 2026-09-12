@@ -18,7 +18,13 @@ const envSchema = z.object({
   // will consider. Without a bound this scan (and its vector-store lookup) grows
   // linearly with the entire lifetime message count, which gets slow.
   MEMORY_SEARCH_SCAN_LIMIT: z.coerce.number().int().positive().default(500),
-  RAG_MIN_SCORE: z.coerce.number().min(-1).max(1).default(0.18),
+  // Only inject documents that are actually relevant. At the old 0.18 almost
+  // anything cleared the bar, so six chunks were pushed into every prompt
+  // regardless of the question, eating most of the context window.
+  RAG_MIN_SCORE: z.coerce.number().min(-1).max(1).default(0.45),
+  // Assumed context window when the client doesn't send one, used only to
+  // size the retrieval budget (see orchestrator.ts).
+  NUM_CTX_FALLBACK: z.coerce.number().int().positive().default(4096),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   MAX_TOOL_ROUNDS: z.coerce.number().int().positive().default(5),
 })
@@ -111,6 +117,7 @@ export const config: {
   memoryFactLimit: number
   memorySearchScanLimit: number
   ragMinScore: number
+  numCtxFallback: number
   corsOrigin: string
   corsOrigins: string[]
   maxToolRounds: number
@@ -128,6 +135,7 @@ export const config: {
   memoryFactLimit: parsed.MEMORY_FACT_LIMIT,
   memorySearchScanLimit: parsed.MEMORY_SEARCH_SCAN_LIMIT,
   ragMinScore: parsed.RAG_MIN_SCORE,
+  numCtxFallback: parsed.NUM_CTX_FALLBACK,
   corsOrigin: parsed.CORS_ORIGIN,
   corsOrigins: parsed.CORS_ORIGIN.split(',').map((value) => value.trim()).filter(Boolean),
   maxToolRounds: parsed.MAX_TOOL_ROUNDS,

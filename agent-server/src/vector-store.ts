@@ -161,6 +161,34 @@ export class VectorStore {
     return (this.countStatement.get() as { count: number }).count
   }
 
+  /**
+   * Ingested documents grouped by source, so the UI can show what is actually
+   * being fed into "Retrieved local context" and remove anything that
+   * shouldn't be there. Conversation-memory vectors are excluded - those
+   * belong to memory-core, not to the document store.
+   */
+  async listDocumentSources(): Promise<Array<{ source: string; chunks: number; characters: number }>> {
+    return this.ensureCache()
+      .filter((record) => !record.source.startsWith(CONVERSATION_SOURCE_PREFIX))
+      .reduce((groups: Array<{ source: string; chunks: number; characters: number }>, record) => {
+        const existing = groups.find((group) => group.source === record.source)
+        if (existing) {
+          existing.chunks += 1
+          existing.characters += record.content.length
+        } else {
+          groups.push({ source: record.source, chunks: 1, characters: record.content.length })
+        }
+        return groups
+      }, [])
+      .sort((left, right) => right.characters - left.characters)
+  }
+
+  async deleteBySource(source: string): Promise<number> {
+    const result = this.database.prepare('DELETE FROM vectors WHERE source = ?').run(source)
+    if (this.cache) this.cache = this.cache.filter((record) => record.source !== source)
+    return result.changes
+  }
+
   async search(
     queryEmbedding: number[],
     limit: number,

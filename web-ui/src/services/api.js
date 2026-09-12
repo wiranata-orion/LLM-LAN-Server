@@ -6,9 +6,11 @@ export const DEFAULT_SETTINGS = {
   laptopUrl: 'http://localhost:11434',
   autoFallback: true,
   theme: 'xufruz', // 'xufruz' | 'cyberpunk' | 'oled' | 'light' | 'grey' | 'dark'
-  numCtx: 2048, // fallback default
-  numCtxLaptop: 2048, // Laptop (Local)
-  numCtxPc: 4096,     // PC (Server)
+  // A 2048 window was too small to hold a real conversation once retrieved
+  // context was added on top, so the model kept losing what was said earlier.
+  numCtx: 4096, // fallback default
+  numCtxLaptop: 4096, // Laptop (Local)
+  numCtxPc: 8192,     // PC (Server)
   temperature: 0.7,
   maxTokens: '',
   // Model Auto: when enabled, the model used per message is picked automatically
@@ -236,8 +238,8 @@ export async function sendMessageStream({
   }
 
   const activeNumCtx = settings.activeEngine === 'pc'
-    ? (settings.numCtxPc || settings.numCtx || 4096)
-    : (settings.numCtxLaptop || settings.numCtx || 2048)
+    ? (settings.numCtxPc || settings.numCtx || 8192)
+    : (settings.numCtxLaptop || settings.numCtx || 4096)
 
   if (activeNumCtx !== undefined && activeNumCtx !== '') {
     body.options.num_ctx = parseInt(activeNumCtx)
