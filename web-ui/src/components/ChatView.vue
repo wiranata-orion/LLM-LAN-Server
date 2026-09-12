@@ -2,7 +2,8 @@
 import { ref, nextTick, watch, onMounted, computed } from 'vue'
 import MessageBubble from './MessageBubble.vue'
 import ChatInput from './ChatInput.vue'
-import { Bot, Sparkles, Cpu, Zap, Copy, Check, RefreshCw } from 'lucide-vue-next'
+import { Bot, Sparkles, Cpu, Zap, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-vue-next'
+import { getModelDisplayName, formatDuration } from '../services/api.js'
 
 const props = defineProps({
   messages: {
@@ -17,9 +18,27 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  generationElapsedSeconds: {
+    type: Number,
+    default: 0,
+  },
 })
 
-const emit = defineEmits(['send', 'stop', 'regenerate'])
+const emit = defineEmits(['send', 'stop', 'regenerate', 'rate-message'])
+
+function isMessageStreaming(index) {
+  return props.isGenerating && index === props.messages.length - 1
+}
+
+// A rating is final. `:disabled` on the buttons already prevents this from
+// firing once one is picked, but that's a presentation detail - this guard is
+// the real source of truth, so a rating can never change no matter what UI
+// state (a stale disabled binding, a race with a data reload, anything else)
+// let the click through.
+function emitRate(index, rating) {
+  if (props.messages[index]?.rating) return
+  emit('rate-message', index, rating)
+}
 
 const messagesContainer = ref(null)
 const userScrolling = ref(false)
@@ -81,11 +100,15 @@ const features = [
   { icon: Zap, title: 'Multi Model', desc: 'Model sesuai kebutuhan' },
 ]
 
-const copied = ref(false)
-function copyContent(text) {
+// Tracks which message's Copy button most recently succeeded, so only that
+// one button flips to "Copied" instead of every Copy button at once.
+const copiedIndex = ref(null)
+function copyContent(text, index) {
   navigator.clipboard.writeText(text)
-  copied.value = true
-  setTimeout(() => copied.value = false, 2000)
+  copiedIndex.value = index
+  setTimeout(() => {
+    if (copiedIndex.value === index) copiedIndex.value = null
+  }, 2000)
 }
 
 function emitRegenerate() {
@@ -119,19 +142,57 @@ function emitRegenerate() {
       <template v-else>
         <template v-for="(msg, i) in messages" :key="i">
           <div class="message-item">
-            <MessageBubble :message="msg" :is-generating="isGenerating" />
+            <MessageBubble
+              :message="msg"
+              :is-generating="isMessageStreaming(i)"
+              :elapsed-seconds="generationElapsedSeconds"
+            />
 
-            <div v-if="msg.role === 'assistant'" class="message-actions">
-              <button class="action-btn" @click="copyContent(msg.content)" :title="copied ? 'Copied!' : 'Copy response'">
-                <Check v-if="copied" :size="14" />
+            <!-- Actions settle in only once this reply has fully finished. -->
+            <div v-if="msg.role === 'assistant' && !isMessageStreaming(i)" class="message-actions">
+              <button class="action-btn" @click="copyContent(msg.content, i)" :title="copiedIndex === i ? 'Copied!' : 'Copy response'">
+                <Check v-if="copiedIndex === i" :size="14" />
                 <Copy v-else :size="14" />
-                <span>{{ copied ? 'Copied' : 'Copy' }}</span>
+                <span>{{ copiedIndex === i ? 'Copied' : 'Copy' }}</span>
               </button>
               <button v-if="i === messages.length - 1" class="action-btn" @click="emitRegenerate" title="Regenerate response" :disabled="isGenerating" :class="{ 'action-btn--disabled': isGenerating }">
                 <RefreshCw :size="14" />
                 <span>Regenerate</span>
               </button>
-              <span class="model-label" v-if="msg.model">{{ msg.model }}</span>
+
+              <div class="rating-buttons" role="group" aria-label="Nilai jawaban ini">
+                <button
+                  class="rating-btn"
+                  :class="{
+                    'rating-btn--active rating-btn--yes': msg.rating === 'good',
+                    'rating-btn--locked': msg.rating && msg.rating !== 'good',
+                  }"
+                  :disabled="!!msg.rating"
+                  @click="emitRate(i, 'good')"
+                  :title="msg.rating ? 'Penilaian sudah dikunci' : 'Jawaban ini sudah sesuai'"
+                >
+                  <ThumbsUp :size="13" />
+                  <span>Yes</span>
+                </button>
+                <button
+                  class="rating-btn"
+                  :class="{
+                    'rating-btn--active rating-btn--no': msg.rating === 'bad',
+                    'rating-btn--locked': msg.rating && msg.rating !== 'bad',
+                  }"
+                  :disabled="!!msg.rating"
+                  @click="emitRate(i, 'bad')"
+                  :title="msg.rating ? 'Penilaian sudah dikunci' : 'Jawaban ini kurang sesuai'"
+                >
+                  <ThumbsDown :size="13" />
+                  <span>No</span>
+                </button>
+              </div>
+
+              <div class="message-meta">
+                <span v-if="msg.durationMs" class="duration-label" :title="`Waktu respons: ${formatDuration(msg.durationMs)}`">{{ formatDuration(msg.durationMs) }}</span>
+                <span class="model-label" v-if="msg.model" :title="msg.model">{{ getModelDisplayName(msg.model) }}</span>
+              </div>
             </div>
           </div>
         </template>
@@ -315,11 +376,111 @@ function emitRegenerate() {
   pointer-events: none;
 }
 
+.rating-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 4px;
+  margin-left: 4px;
+  border-left: 1px solid var(--color-border);
+}
+
+.rating-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.rating-btn:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-light);
+  background: var(--color-bg-hover);
+}
+
+/* Confirmed choice: solid fill + a one-time pop so the click clearly registers. */
+.rating-btn--active {
+  cursor: default;
+  animation: ratingConfirm 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.rating-btn--active.rating-btn--yes {
+  color: white;
+  border-color: var(--color-success, #22c55e);
+  background: var(--color-success, #22c55e);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success, #22c55e) 25%, transparent);
+}
+
+.rating-btn--active.rating-btn--no {
+  color: white;
+  border-color: var(--color-danger, #ef4444);
+  background: var(--color-danger, #ef4444);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger, #ef4444) 25%, transparent);
+}
+
+/* A locked-in button must look and feel identical whether hovered or not -
+   nothing about it should suggest it's still interactive. */
+.rating-btn--active.rating-btn--yes:hover {
+  color: white;
+  background: var(--color-success, #22c55e);
+  border-color: var(--color-success, #22c55e);
+}
+
+.rating-btn--active.rating-btn--no:hover {
+  color: white;
+  background: var(--color-danger, #ef4444);
+  border-color: var(--color-danger, #ef4444);
+}
+
+@keyframes ratingConfirm {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+
+/* The button not chosen fades out once a rating is locked in, so it's obvious
+   at a glance which one was picked and that it can no longer be changed. */
+.rating-btn--locked {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.rating-btn--locked:hover {
+  background: none;
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+}
+
+
+.message-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.duration-label {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  opacity: 0.8;
+}
+
 .model-label {
   font-size: 0.75rem;
   color: var(--color-text-muted);
-  margin-left: 8px;
   opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
 }
 
 .typing-indicator-row {

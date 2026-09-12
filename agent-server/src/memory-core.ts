@@ -49,6 +49,13 @@ export interface MemoryCore {
   search(query: string, queryEmbedding?: number[] | null, excludeId?: string): Promise<MemorySearchResult[]>
   getCoreProfile(): Promise<string>
   getLayerSnapshot(sessionId: string): Promise<MemoryLayerSnapshot>
+  /**
+   * Records the user's Yes/No feedback on a specific past reply. Future memory
+   * search surfaces this alongside the retrieved exchange (see orchestrator.ts),
+   * so the model can see "this approach was rated unhelpful" for similar
+   * questions instead of repeating the same mistake.
+   */
+  rateMessage(id: string, rating: 'good' | 'bad' | null): Promise<boolean>
   exportJsonl(outputPath: string): Promise<void>
   importJsonl(inputPath: string): Promise<number>
   close(): void
@@ -67,6 +74,36 @@ function keywordScore(query: string, message: string): number {
   let matches = 0
   for (const word of queryWords) if (messageWords.has(word)) matches += 1
   return matches / queryWords.size
+}
+
+// A question or request doesn't assert a fact - it's the answer that's worth
+// recalling. Without this, a question the user has repeated across several
+// chats (e.g. while testing something) tends to out-rank the one real answer,
+// since all those near-duplicate questions score highly against each other.
+// Casual Indonesian very often phrases a request imperatively with no "?" at
+// all ("sebutkan nama saya" / "katakan nama ku") - a plain trailing-"?" check
+// misses that entire class of message, so a request-verb-near-a-pronoun
+// pattern is checked too.
+const REQUEST_FOR_SELF_PATTERN = /\b(sebut(kan)?|katakan|beritahu|tunjukkan|ingatkan)\b[^.!?]{0,30}\b(saya|ku|mu|aku|kamu|anda)\b/i
+const TELL_ME_PATTERN = /\b(tell me|remind me|say)\b[^.!?]{0,30}\b(my|your)\b/i
+
+function isQuestion(message: string): boolean {
+  const trimmed = message.trim()
+  if (trimmed.endsWith('?')) return true
+  return REQUEST_FOR_SELF_PATTERN.test(trimmed) || TELL_ME_PATTERN.test(trimmed)
+}
+
+// Hedges, refusals, and unfilled template placeholders ("[Nama Anda]") carry
+// no real information. Left in the searchable pool they create a feedback
+// loop: once the model gives one of these non-answers, it gets stored and can
+// resurface as "relevant memory" for the next similar question, reinforcing
+// the same non-answer indefinitely instead of the actual fact.
+const LOW_SIGNAL_REPLY_PATTERN = /\b(tidak (dapat|bisa) (memberikan|membagikan|memberitahu)|tidak memiliki akses|privasi (pengguna|anda)|maaf,? saya tidak|i (cannot|can't|don't) (provide|share|know|have access)|as an ai( language model)?)\b/i
+const UNFILLED_PLACEHOLDER_PATTERN = /\[[^\[\]]{2,40}\]/
+
+function isLowSignalReply(sender: string, message: string): boolean {
+  if (sender !== 'assistant') return false
+  return LOW_SIGNAL_REPLY_PATTERN.test(message) || UNFILLED_PLACEHOLDER_PATTERN.test(message)
 }
 
 function toRecord(row: Record<string, unknown>): MemoryRecord {
@@ -112,6 +149,8 @@ export class SqliteMemoryCore implements MemoryCore {
   private readonly upsertSummaryStatement: Database.Statement
   private readonly selectSessionFactsStatement: Database.Statement
   private readonly upsertFactStatement: Database.Statement
+  private readonly selectByIdStatement: Database.Statement
+  private readonly updateMetadataStatement: Database.Statement
 
   constructor(private readonly vectorStore: VectorStore) {
     mkdirSync(path.dirname(config.memoryDbPath), { recursive: true })
@@ -195,6 +234,12 @@ export class SqliteMemoryCore implements MemoryCore {
       ON CONFLICT(session_id, scope, key)
       DO UPDATE SET value = excluded.value, confidence = excluded.confidence, updated_at = excluded.updated_at
     `)
+    this.selectByIdStatement = this.database.prepare(
+      'SELECT id, session_id, timestamp, sender, message, metadata FROM conversations WHERE id = ?',
+    )
+    this.updateMetadataStatement = this.database.prepare(
+      'UPDATE conversations SET metadata = ? WHERE id = ?',
+    )
   }
 
   async appendMessage(sender: string, message: string, metadata: Record<string, unknown> = {}): Promise<MemoryRecord> {
@@ -239,6 +284,8 @@ export class SqliteMemoryCore implements MemoryCore {
     if (!query.trim()) return []
     const rows = (this.selectRecentForSearchStatement.all(config.memorySearchScanLimit) as Record<string, unknown>[])
       .filter((row) => !excludeId || String(row.id) !== excludeId)
+      .filter((row) => !isQuestion(String(row.message)))
+      .filter((row) => !isLowSignalReply(String(row.sender), String(row.message)))
 
     let queryEmbedding: number[] | null | undefined = precomputedEmbedding
     if (queryEmbedding === undefined) {
@@ -267,6 +314,16 @@ export class SqliteMemoryCore implements MemoryCore {
       .filter((record) => record.semanticScore > 0 || record.keywordScore > 0)
       .sort((left, right) => right.score - left.score)
       .slice(0, config.maxRetrievedChunks)
+  }
+
+  async rateMessage(id: string, rating: 'good' | 'bad' | null): Promise<boolean> {
+    const row = this.selectByIdStatement.get(id) as Record<string, unknown> | undefined
+    if (!row) return false
+    const metadata = parseMetadata(row.metadata)
+    if (rating) metadata.rating = rating
+    else delete metadata.rating
+    this.updateMetadataStatement.run(JSON.stringify(metadata), id)
+    return true
   }
 
   async getCoreProfile(): Promise<string> {

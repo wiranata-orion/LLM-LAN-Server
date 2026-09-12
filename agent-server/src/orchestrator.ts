@@ -11,11 +11,23 @@ const agentInstruction = `You are Xufruz, a helpful, friendly local AI assistant
 If asked your name, who made you, or what model/company you are, answer only as Xufruz - a local assistant running on the user's own machine. Never claim to be Claude, ChatGPT, Gemini, or any other named assistant, and never claim to have been made by Anthropic, OpenAI, Google, or any other AI company, even if that is what you were trained to say. You do not know or need to disclose which underlying open-weight model you are built on.
 Respond naturally and conversationally to greetings and everyday messages.
 Never expose internal system details, database IDs, logs, or orchestration metadata (e.g., SQLite refs, memory keys, tool details) in your final response to the user.
-Use retrieved context or memory only when relevant to answer the user's explicit question.`
+Use retrieved context or memory only when relevant to answer the user's explicit question.
+This is a personal, single-user local assistant: when Session Summary, Structured Facts, or Relevant Memory show that the user has already told you something about themselves (their name, preferences, other facts), recalling and stating it back when asked is expected and wanted - it is not a privacy violation, so never refuse on privacy grounds to repeat information the user themselves gave you. If you don't actually know a value, just say so plainly; never answer with an unfilled placeholder like "[nama Anda]" or "[your name]" in place of a real value. When memory shows the user directly stated a fact, treat it as reliable and use it confidently; if it also shows a past assistant reply that conflicts with what the user said, the user's own words are always the correct ones to trust.`
 
 interface PreparedContext {
   messages: ChatMessage[]
   retrievedChunks: number
+}
+
+/**
+ * Surfaces the user's Yes/No feedback (see MessageBubble.vue) on a retrieved
+ * past exchange directly in the model's context, so a reply the user marked
+ * unhelpful isn't quietly repeated for a similar question later.
+ */
+function describeRating(rating: unknown): string {
+  if (rating === 'good') return ' [User marked this reply as helpful]'
+  if (rating === 'bad') return ' [User marked this reply as NOT helpful - avoid repeating this approach]'
+  return ''
 }
 
 export class AgentOrchestrator {
@@ -65,7 +77,9 @@ export class AgentOrchestrator {
     const memoryContext = [
       memoryState.rollingSummary ? `Session Summary:\n${memoryState.rollingSummary}` : '',
       memoryState.facts.length ? `Structured Facts:\n${memoryState.facts.map((fact) => `${fact.key}: ${fact.value}`).join('\n')}` : '',
-      memoryResults.length ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}`).join('\n')}` : '',
+      memoryResults.length
+        ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}${describeRating(item.metadata?.rating)}`).join('\n')}`
+        : '',
     ].filter(Boolean).join('\n\n')
 
     const messages: ChatMessage[] = [
@@ -84,16 +98,18 @@ export class AgentOrchestrator {
     conversationId = 'default',
     options?: ChatOptions,
     ollamaBaseUrl?: string,
+    signal?: AbortSignal,
   ): Promise<AgentResponse> {
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
-      const response = await chat(messages, toolDefinitions, model, options, ollamaBaseUrl)
+      signal?.throwIfAborted()
+      const response = await chat(messages, toolDefinitions, model, options, ollamaBaseUrl, signal)
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
-        await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
-        return { message: response.message, toolRounds: round, retrievedChunks }
+        const appended = await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
+        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }
 
       for (const call of toolCalls) {
@@ -117,16 +133,18 @@ export class AgentOrchestrator {
     onToken: (content: string) => void,
     options?: ChatOptions,
     ollamaBaseUrl?: string,
+    signal?: AbortSignal,
   ): Promise<AgentResponse> {
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
-      const response = await chatStream(messages, toolDefinitions, model, onToken, options, ollamaBaseUrl)
+      signal?.throwIfAborted()
+      const response = await chatStream(messages, toolDefinitions, model, onToken, options, ollamaBaseUrl, signal)
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
-        await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
-        return { message: response.message, toolRounds: round, retrievedChunks }
+        const appended = await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
+        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }
       for (const call of toolCalls) {
         let result: string

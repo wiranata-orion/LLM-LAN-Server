@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test src/chunker.test.ts src/memory-core.test.ts src/vector-store.test.ts src/fs-browser.test.ts src/chat-history-store.test.ts"
+    "test": "node --import tsx --test src/chunker.test.ts src/memory-core.test.ts src/vector-store.test.ts src/fs-browser.test.ts src/chat-history-store.test.ts src/rate-message.test.ts src/memory-search-quality.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
