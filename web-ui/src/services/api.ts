@@ -12,6 +12,7 @@ export interface AgentChatResult {
   message?: AgentMessage
   toolRounds?: number
   retrievedChunks?: number
+  memoryId?: string
   error?: string
 }
 
@@ -20,6 +21,7 @@ export interface AgentStreamEvent {
   content?: string
   toolRounds?: number
   retrievedChunks?: number
+  memoryId?: string
 }
 
 const DEFAULT_AGENT_URL = 'http://127.0.0.1:8787/api'
@@ -125,6 +127,7 @@ export async function sendMessageStream(
   signal: AbortSignal,
   conversationId: string,
   onToken: (content: string) => void,
+  onMeta?: (meta: { retrievedChunks?: number; memoryId?: string }) => void,
   isFallbackRetry = false,
 ): Promise<void> {
   const settings = getSettings()
@@ -133,7 +136,7 @@ export async function sendMessageStream(
     if (settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry && isConnectivityError(messageText)) {
       saveSettingsToStorage({ activeEngine: 'laptop' })
       dispatchEngineFallback('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
-      await sendMessageStream(message, history, model, signal, conversationId, onToken, true)
+      await sendMessageStream(message, history, model, signal, conversationId, onToken, onMeta, true)
       return true
     }
     return false
@@ -173,6 +176,7 @@ export async function sendMessageStream(
 
   const handleEvent = async (event: AgentStreamEvent): Promise<boolean> => {
     if (event.type === 'token' && event.content) onToken(event.content)
+    if (event.type === 'meta') onMeta?.({ retrievedChunks: event.retrievedChunks, memoryId: event.memoryId })
     if (event.type === 'error') {
       const messageText = event.content || 'Agent request failed'
       if (await fallbackIfEligible(messageText)) return true
@@ -211,6 +215,19 @@ export async function uploadDocument(file: File): Promise<{ ok: boolean; documen
 
 export async function checkAgentHealth(): Promise<{ ok: boolean; error?: string }> {
   return requestJson('/health', { method: 'GET' })
+}
+
+/**
+ * Records Yes/No feedback on a specific past reply (identified by the
+ * `memoryId` returned alongside the chat response). The agent-server surfaces
+ * this feedback the next time that exchange is retrieved as relevant memory,
+ * so a reply marked "No" isn't quietly repeated for a similar question later.
+ */
+export async function rateMemoryMessage(memoryId: string, rating: 'good' | 'bad' | null): Promise<{ ok: boolean; error?: string }> {
+  return requestJson(`/memory/messages/${encodeURIComponent(memoryId)}/rating`, {
+    method: 'POST',
+    body: JSON.stringify({ rating }),
+  })
 }
 
 export interface MemoryStorageInfo {

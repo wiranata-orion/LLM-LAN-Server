@@ -5,7 +5,7 @@ import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
 import { getModels, getSettings, saveSettingsToStorage, setModelNickname, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
-import { sendMessageStream as sendAgentMessageStream, uploadDocument } from './services/api.ts'
+import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage } from './services/api.ts'
 import { resolveAutoModel } from './services/autoModel.js'
 import {
   loadStoredConversations,
@@ -27,6 +27,9 @@ const isGenerating = ref(false)
 const currentEngine = ref('laptop')
 const isCurrentEngineOnline = ref(null)
 const fallbackToast = ref('')
+// Ticks while the active reply streams in, so the UI can show a live "Xs" timer;
+// frozen onto the message itself as `durationMs` once generation finishes.
+const generationElapsedSeconds = ref(0)
 
 // Conversation state
 const folders = reactive([])
@@ -34,6 +37,7 @@ const conversations = reactive([])
 const activeConversationId = ref(null)
 
 let abortController = null
+let generationTimerHandle = null
 
 // ===== Computed =====
 const activeConversation = computed(() => {
@@ -95,6 +99,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('engine-fallback', handleEngineFallback)
+  if (generationTimerHandle) clearInterval(generationTimerHandle)
 })
 
 // ===== API =====
@@ -395,9 +400,16 @@ async function generateAssistantResponse() {
     role: 'assistant',
     content: '',
     model: modelForThisMessage,
+    rating: null,
   })
   const assistantIdx = conv.messages.length - 1
   isGenerating.value = true
+
+  const generationStartedAt = Date.now()
+  generationElapsedSeconds.value = 0
+  generationTimerHandle = setInterval(() => {
+    generationElapsedSeconds.value = (Date.now() - generationStartedAt) / 1000
+  }, 100)
 
   const memoryMessages = latestUserMessage?.content
     ? await buildMemoryMessages({
@@ -417,18 +429,51 @@ async function generateAssistantResponse() {
       (token) => {
         conv.messages[assistantIdx].content += token
       },
+      (meta) => {
+        if (meta.memoryId) conv.messages[assistantIdx].memoryId = meta.memoryId
+      },
     )
   } catch (error) {
     if (!abortController.signal.aborted) {
       conv.messages[assistantIdx].content = `Error: ${error instanceof Error ? error.message : 'Agent request failed'}`
     }
   } finally {
+    clearInterval(generationTimerHandle)
+    generationTimerHandle = null
+    conv.messages[assistantIdx].durationMs = Date.now() - generationStartedAt
     isGenerating.value = false
     abortController = null
     saveConversation(conv, modelForThisMessage).catch((error) => {
       console.error('Conversation memory final save failed:', error)
     })
     saveState()
+  }
+}
+
+// Yes/No feedback on a reply (see MessageBubble.vue). Persisted with the
+// conversation, and forwarded to the agent-server so the next time this
+// exchange is retrieved as relevant memory, the model sees whether it helped.
+// A rating is final once given - the buttons lock immediately after (see
+// ChatView.vue), so this never needs to change or clear an existing rating.
+async function handleRateMessage(messageIndex, rating) {
+  const conv = activeConversation.value
+  if (!conv) return
+  const msg = conv.messages[messageIndex]
+  if (!msg || msg.role !== 'assistant' || msg.rating) return
+
+  msg.rating = rating
+
+  saveConversation(conv, msg.model).catch((error) => {
+    console.error('Failed to persist message rating:', error)
+  })
+  saveState()
+
+  if (msg.memoryId) {
+    try {
+      await rateMemoryMessage(msg.memoryId, rating)
+    } catch (error) {
+      console.warn('Failed to forward rating to agent-server memory:', error)
+    }
   }
 }
 
@@ -508,6 +553,14 @@ async function onFolderChanged() {
 
 async function loadSelectedDirectoryState() {
   const previousActiveId = activeConversationId.value
+  // A rating is a one-way, permanent action, so this reload must never revert
+  // one. If it lands while a just-given rating is still being saved (e.g. the
+  // user opens Settings right after rating a reply), the freshly-fetched copy
+  // may not have that rating yet - snapshot local ratings first and reapply
+  // them below rather than trusting the reload to already reflect them.
+  const localRatingsByConversation = new Map(
+    conversations.map((conv) => [conv.id, conv.messages.map((message) => message.rating || null)]),
+  )
 
   try {
     const [storedConversations, storedFolders] = await Promise.all([
@@ -516,6 +569,14 @@ async function loadSelectedDirectoryState() {
     ])
 
     if (!storedConversations || !storedFolders) return
+
+    for (const conv of storedConversations) {
+      const localRatings = localRatingsByConversation.get(conv.id)
+      if (!localRatings) continue
+      conv.messages.forEach((message, index) => {
+        if (localRatings[index] && !message.rating) message.rating = localRatings[index]
+      })
+    }
 
     conversations.splice(0, conversations.length, ...(storedConversations || []))
     folders.splice(0, folders.length, ...(storedFolders || []))
@@ -714,9 +775,11 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
         :messages="activeMessages"
         :is-generating="isGenerating"
         :model-name="selectedModel"
+        :generation-elapsed-seconds="generationElapsedSeconds"
         @send="sendMessage"
         @stop="stopGeneration"
         @regenerate="handleRegenerate"
+        @rate-message="handleRateMessage"
       />
     </main>
 

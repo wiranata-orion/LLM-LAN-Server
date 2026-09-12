@@ -115,7 +115,7 @@ export function createRouter(context: AppContext): Router {
             body.options,
             body.ollamaBaseUrl,
           )
-          response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks })}\n`)
+          response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)
           response.end()
           return
@@ -141,9 +141,27 @@ export function createRouter(context: AppContext): Router {
         message: result.message,
         toolRounds: result.toolRounds,
         retrievedChunks: result.retrievedChunks,
+        memoryId: result.memoryId,
       })
     } catch (error) {
       response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Agent request failed' })
+    }
+  })
+
+  // Yes/No feedback on a specific past reply (see MessageBubble.vue). Persisted
+  // into that memory record's metadata so future retrieval of this exchange
+  // carries the feedback into the model's context - see orchestrator.ts.
+  router.post('/memory/messages/:id/rating', async (request, response) => {
+    try {
+      const body = z.object({ rating: z.enum(['good', 'bad']).nullable() }).parse(request.body)
+      const found = await context.current.memory.rateMessage(request.params.id, body.rating)
+      if (!found) {
+        response.status(404).json({ ok: false, error: 'Message not found in memory' })
+        return
+      }
+      response.json({ ok: true })
+    } catch (error) {
+      response.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'Failed to save rating' })
     }
   })
 

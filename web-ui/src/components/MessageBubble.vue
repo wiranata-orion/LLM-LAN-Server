@@ -1,8 +1,9 @@
 <script setup>
 import { computed } from 'vue'
-import { Bot, User, Copy, Check } from 'lucide-vue-next'
+import { Bot, User } from 'lucide-vue-next'
 import hljs from 'highlight.js/lib/common'
-import { ref } from 'vue'
+import MarkdownIt from 'markdown-it'
+import { formatDuration } from '../services/api.js'
 
 const props = defineProps({
   message: {
@@ -14,143 +15,144 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  // Live seconds elapsed since this reply started generating; ticks while
+  // isGenerating is true, from the very first moment (before any token has
+  // arrived) through to the last one.
+  elapsedSeconds: {
+    type: Number,
+    default: 0,
+  },
 })
-
-const copied = ref(false)
 
 const isUser = computed(() => props.message.role === 'user')
 const isAssistant = computed(() => props.message.role === 'assistant')
 const isThinking = computed(() => isAssistant.value && props.isGenerating && !props.message.content)
+const elapsedLabel = computed(() => formatDuration(props.elapsedSeconds * 1000))
+
+// ---- Markdown rendering ----
+// CommonMark via markdown-it (already a project dependency) instead of a
+// hand-rolled regex parser: it correctly handles nested lists, loose/tight
+// paragraphs, tables without a trailing "|", headings immediately followed by
+// text, and - importantly for streaming - an unclosed ``` fence just extends
+// to the end of input instead of leaking raw backticks into the page.
+const md = new MarkdownIt({
+  html: false, // never render raw HTML from model output - avoids script/style injection via prompt injection or RAG content
+  linkify: true,
+  breaks: true, // a single newline becomes <br>, matching how chat replies are usually written
+  typographer: false,
+})
+
+// Every link (explicit [text](url) or autolinked bare URL) opens in a new tab
+// safely, without exposing window.opener to the target page.
+const defaultLinkOpen = md.renderer.rules.link_open || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options))
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx]
+  token.attrSet('target', '_blank')
+  token.attrSet('rel', 'noopener noreferrer')
+  return defaultLinkOpen(tokens, idx, options, env, self)
+}
+
+// Custom fenced-code rendering: syntax highlighting plus the copy-button card,
+// instead of markdown-it's plain <pre><code>.
+md.renderer.rules.fence = (tokens, idx) => {
+  const token = tokens[idx]
+  const lang = (token.info || '').trim().split(/\s+/)[0]
+  return createCodeBlock(lang, token.content)
+}
+
+const MATH_BLOCK_TOKEN = 'XUFRUZMATHBLOCKPLACEHOLDERx'
+const MATH_INLINE_TOKEN = 'XUFRUZMATHINLINEPLACEHOLDERx'
+const CODE_FENCE_TOKEN = 'XUFRUZCODEFENCEPLACEHOLDERx'
+
+// Hides fenced code blocks (closed or, mid-stream, still open) behind a
+// placeholder line so the math substitution below never rewrites a literal
+// "$" inside code (e.g. `echo $HOME`, "$5"). Restored verbatim before
+// markdown-it runs, so its own fence parsing (see md.renderer.rules.fence)
+// still sees the real ``` syntax.
+function protectCodeFences(text) {
+  const lines = text.split('\n')
+  const fences = []
+  const output = []
+  let fenceMarker = null
+  let current = []
+
+  for (const line of lines) {
+    if (!fenceMarker) {
+      const open = line.match(/^ {0,3}(`{3,}|~{3,})/)
+      if (open) {
+        fenceMarker = open[1][0]
+        current = [line]
+        continue
+      }
+      output.push(line)
+      continue
+    }
+
+    current.push(line)
+    const closePattern = fenceMarker === '`' ? /^ {0,3}`{3,}\s*$/ : /^ {0,3}~{3,}\s*$/
+    if (closePattern.test(line)) {
+      fences.push(current.join('\n'))
+      output.push(`${CODE_FENCE_TOKEN}${fences.length - 1}${CODE_FENCE_TOKEN}`)
+      fenceMarker = null
+      current = []
+    }
+  }
+  // Streaming: the fence hasn't closed yet - protect what's there so far.
+  if (fenceMarker) {
+    fences.push(current.join('\n'))
+    output.push(`${CODE_FENCE_TOKEN}${fences.length - 1}${CODE_FENCE_TOKEN}`)
+  }
+
+  return { text: output.join('\n'), fences }
+}
 
 function renderMarkdown(text) {
   if (!text) return ''
 
-  let html = text
+  const { text: withoutCode, fences: codeFences } = protectCodeFences(text)
 
-  // ---- Code blocks: extract and protect first ----
-  const codeBlocks = []
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`
-    codeBlocks.push(createCodeBlock(lang, code))
-    return placeholder
+  // ---- LaTeX math: protect from markdown-it first (e.g. "_" in math would
+  // otherwise be read as emphasis), restore the rendered formulas afterward.
+  const mathBlocks = []
+  const mathInlines = []
+  let source = withoutCode
+
+  // Force display math onto its own paragraph even when the model wrote it
+  // mid-sentence: substituting a block-level <div> into inline text otherwise
+  // leaves a <div> nested inside a <p> (invalid HTML that some browsers
+  // recover from by leaving the paragraph unclosed).
+  source = source.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
+    mathBlocks.push(formatMath(math.trim()))
+    return `\n\n${MATH_BLOCK_TOKEN}${mathBlocks.length - 1}${MATH_BLOCK_TOKEN}\n\n`
+  })
+  source = source.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => {
+    mathBlocks.push(formatMath(math.trim()))
+    return `\n\n${MATH_BLOCK_TOKEN}${mathBlocks.length - 1}${MATH_BLOCK_TOKEN}\n\n`
+  })
+  source = source.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+    mathInlines.push(formatMath(math.trim()))
+    return `${MATH_INLINE_TOKEN}${mathInlines.length - 1}${MATH_INLINE_TOKEN}`
+  })
+  source = source.replace(/\\\(([^\n]*?)\\\)/g, (_, math) => {
+    mathInlines.push(formatMath(math.trim()))
+    return `${MATH_INLINE_TOKEN}${mathInlines.length - 1}${MATH_INLINE_TOKEN}`
   })
 
-  // Render an unfinished code block while the response is still streaming.
-  html = html.replace(/```(\w*)\n([\s\S]*)$/g, (_, lang, code) => {
-    const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`
-    codeBlocks.push(createCodeBlock(lang, code))
-    return placeholder
-  })
+  // Restore the real fence syntax now, so markdown-it parses and highlights it.
+  source = source.replace(new RegExp(`${CODE_FENCE_TOKEN}(\\d+)${CODE_FENCE_TOKEN}`, 'g'), (_, i) => codeFences[Number(i)])
 
-  // Escape HTML (after code blocks are protected)
-  html = html
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
+  let html = md.render(source)
 
-  // ---- LaTeX Math ----
-  // Display math: $$...$$
-  html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
-    return `<div class="math-block">${formatMath(math.trim())}</div>`
-  })
-  // Display math: \[...\]
-  html = html.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => {
-    return `<div class="math-block">${formatMath(math.trim())}</div>`
-  })
-  // Inline math: $...$
-  html = html.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
-    return `<span class="math-inline">${formatMath(math.trim())}</span>`
-  })
-  // Inline math: \(...\)
-  html = html.replace(/\\\(([^\n]*?)\\\)/g, (_, math) => {
-    return `<span class="math-inline">${formatMath(math.trim())}</span>`
-  })
-
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
-
-  // Bold
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-
-  // Italic
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
-
-  // Strikethrough
-  html = html.replace(/~~(.+?)~~/g, '<del>$1</del>')
-
-  // Blockquotes
-  html = html.replace(/^&gt;\s?(.+)$/gm, '<blockquote>$1</blockquote>')
-
-  // Headings
-  html = html.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>')
-  html = html.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
-  html = html.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
-  html = html.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>')
-
-  // Horizontal rule
-  html = html.replace(/^---$/gm, '<hr>')
-
-  // Links
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-
-  // ---- Tables ----
-  html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (tableBlock) => {
-    const rows = tableBlock.trim().split('\n').filter(r => r.trim())
-    if (rows.length < 2) return tableBlock
-    // Check if second row is a separator row (|---|---|)
-    const sepRow = rows[1]
-    if (!/^\|[\s\-:|]+\|$/.test(sepRow)) return tableBlock
-    const headerCells = rows[0].split('|').filter((c, i, a) => i > 0 && i < a.length - 1).map(c => c.trim())
-    const bodyRows = rows.slice(2)
-    let tableHtml = '<table><thead><tr>'
-    headerCells.forEach(c => { tableHtml += `<th>${c}</th>` })
-    tableHtml += '</tr></thead><tbody>'
-    bodyRows.forEach(row => {
-      const cells = row.split('|').filter((c, i, a) => i > 0 && i < a.length - 1).map(c => c.trim())
-      tableHtml += '<tr>'
-      cells.forEach(c => { tableHtml += `<td>${c}</td>` })
-      tableHtml += '</tr>'
-    })
-    tableHtml += '</tbody></table>'
-    return tableHtml
-  })
-
-  // ---- Nested lists (stack-based) ----
-  html = processLists(html)
-
-  // Restore code blocks
-  codeBlocks.forEach((block, i) => {
-    html = html.replace(`%%CODEBLOCK_${i}%%`, block)
-  })
-
-  // Paragraphs: wrap non-block lines
-  html = html
-    .split('\n\n')
-    .map((block) => {
-      const trimmed = block.trim()
-      if (!trimmed) return ''
-      if (
-        trimmed.startsWith('<pre') ||
-        trimmed.startsWith('<h') ||
-        trimmed.startsWith('<ul') ||
-        trimmed.startsWith('<ol') ||
-        trimmed.startsWith('<blockquote') ||
-        trimmed.startsWith('<hr') ||
-        trimmed.startsWith('<div') ||
-        trimmed.startsWith('<table') ||
-        trimmed.startsWith('%%CODEBLOCK')
-      ) {
-        return trimmed
-      }
-      return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`
-    })
-    .join('\n')
+  const blockTokenRegex = new RegExp(`(?:<p>)?${MATH_BLOCK_TOKEN}(\\d+)${MATH_BLOCK_TOKEN}(?:</p>)?`, 'g')
+  html = html.replace(blockTokenRegex, (_, i) => `<div class="math-block">${mathBlocks[Number(i)]}</div>`)
+  const inlineTokenRegex = new RegExp(`${MATH_INLINE_TOKEN}(\\d+)${MATH_INLINE_TOKEN}`, 'g')
+  html = html.replace(inlineTokenRegex, (_, i) => `<span class="math-inline">${mathInlines[Number(i)]}</span>`)
 
   return html
 }
 
 function createCodeBlock(lang, code) {
-  const cleanCode = code.trim()
+  const cleanCode = code.replace(/\n$/, '')
   const safeCode = escapeHtml(cleanCode)
   let highlightedCode = safeCode
 
@@ -161,7 +163,7 @@ function createCodeBlock(lang, code) {
     }).value
   }
 
-  return `<div class="code-card"><div class="code-header"><span class="code-lang">${lang || 'code'}</span><button class="copy-code-btn" data-code="${safeCode.replace(/"/g, '&quot;')}" onclick="copyCode(this.dataset.code)">Copy</button></div><pre><code class="language-${lang} hljs">${highlightedCode}</code></pre></div>`
+  return `<div class="code-card"><div class="code-header"><span class="code-lang">${lang || 'code'}</span><button class="copy-code-btn" data-code="${safeCode.replace(/"/g, '&quot;')}" onclick="copyCode(this.dataset.code)">Copy</button></div><pre><code class="language-${lang || 'plaintext'} hljs">${highlightedCode}</code></pre></div>`
 }
 
 function escapeHtml(value) {
@@ -169,100 +171,6 @@ function escapeHtml(value) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-}
-
-// ---- Process nested lists ----
-function processLists(html) {
-  const lines = html.split('\n')
-  const result = []
-  let i = 0
-
-  while (i < lines.length) {
-    const line = lines[i]
-    // Check if this line is a list item (ordered or unordered)
-    const olMatch = line.match(/^(\s*)(\d+)\.\s+(.*)/)
-    const ulMatch = line.match(/^(\s*)[-*]\s+(.*)/)
-
-    if (olMatch || ulMatch) {
-      // Collect all consecutive list lines
-      const listLines = []
-      while (i < lines.length) {
-        const lo = lines[i].match(/^(\s*)(\d+)\.\s+(.*)/)
-        const lu = lines[i].match(/^(\s*)[-*]\s+(.*)/)
-        if (lo || lu) {
-          const indent = (lo ? lo[1] : lu[1]).length
-          const content = lo ? lo[3] : lu[2]
-          const type = lo ? 'ol' : 'ul'
-          const number = lo ? Number(lo[2]) : null
-          listLines.push({ indent, content, type, number })
-          i++
-        } else if (!lines[i].trim() && i + 1 < lines.length) {
-          const nextIsList = /^(\s*)(?:\d+\.|[-*])\s+/.test(lines[i + 1])
-          if (nextIsList) {
-            i++
-          } else {
-            break
-          }
-        } else {
-          break
-        }
-      }
-      result.push(buildNestedList(listLines))
-    } else {
-      result.push(line)
-      i++
-    }
-  }
-  return result.join('\n')
-}
-
-function buildNestedList(items) {
-  if (items.length === 0) return ''
-
-  let html = ''
-  const stack = [] // { type, indent }
-  const minIndent = Math.min(...items.map(it => it.indent))
-
-  for (const item of items) {
-    const level = Math.floor((item.indent - minIndent) / 2)
-    const type = item.type
-
-    while (stack.length > level + 1) {
-      const popped = stack.pop()
-      html += `</li></${popped.type}>`
-    }
-
-    if (stack.length === level + 1) {
-      if (stack[stack.length - 1].type !== type) {
-        const popped = stack.pop()
-        html += `</li></${popped.type}>`
-        html += `<${type}><li${listItemValue(item)}>${item.content}`
-        stack.push({ type, indent: item.indent })
-      } else {
-        html += `</li><li${listItemValue(item)}>${item.content}`
-      }
-    } else {
-      while (stack.length < level) {
-        html += `<ol><li>`
-        stack.push({ type: 'ol', indent: 0 })
-      }
-      html += `<${type}><li${listItemValue(item)}>${item.content}`
-      stack.push({ type, indent: item.indent })
-    }
-  }
-
-  while (stack.length > 0) {
-    const popped = stack.pop()
-    html += `</li></${popped.type}>`
-  }
-
-  return html
-}
-
-function listItemValue(item) {
-  return item.type === 'ol' && Number.isInteger(item.number)
-    ? ` value="${item.number}"`
-    : ''
 }
 
 // ---- LaTeX math formatter ----
@@ -342,18 +250,6 @@ function formatMath(latex) {
   return result
 }
 
-async function copyContent() {
-  try {
-    await navigator.clipboard.writeText(props.message.content)
-    copied.value = true
-    setTimeout(() => {
-      copied.value = false
-    }, 2000)
-  } catch (err) {
-    console.error('Copy failed:', err)
-  }
-}
-
 // Copy code block content
 async function copyCode(code) {
   try {
@@ -381,7 +277,12 @@ window.copyCode = copyCode
 
     <!-- Content -->
     <div class="message-content-wrapper">
-      <span class="message-role">{{ isUser ? 'You' : 'Xufruz' }}</span>
+      <div class="message-role-row">
+        <span class="message-role">{{ isUser ? 'You' : 'Xufruz' }}</span>
+        <span v-if="isAssistant && isGenerating" class="generation-timer" :title="'Sedang menjawab: ' + elapsedLabel">
+          {{ elapsedLabel }}
+        </span>
+      </div>
 
       <div v-if="isUser" class="message-bubble message-bubble--user">
         {{ message.content }}
@@ -396,9 +297,6 @@ window.copyCode = copyCode
         class="message-bubble message-bubble--assistant markdown-body"
         v-html="renderMarkdown(message.content)"
       ></div>
-
-      <!-- Actions (AI only) -->
-
     </div>
   </div>
 </template>
@@ -462,12 +360,33 @@ window.copyCode = copyCode
   gap: 4px;
 }
 
+.message-role-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .message-role {
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+.generation-timer {
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  color: var(--color-text-accent);
+  background: var(--color-accent-subtle);
+  padding: 1px 7px;
+  border-radius: 8px;
+  animation: timerPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes timerPulse {
+  0%, 100% { opacity: 0.75; }
+  50% { opacity: 1; }
 }
 
 .message-bubble {
@@ -801,13 +720,23 @@ window.copyCode = copyCode
 }
 
 /* ===== Strikethrough ===== */
-.markdown-body del {
+.markdown-body del,
+.markdown-body s {
   opacity: 0.6;
 }
 
 /* ===== Paragraphs ===== */
 .markdown-body p {
   margin: 0.5em 0;
+  text-align: justify;
+  text-justify: inter-word;
+  hyphens: auto;
+}
+
+/* Justifying short lines (headings, list items, table cells, code) looks
+   broken rather than tidy, so it's scoped to prose paragraphs only. */
+.markdown-body blockquote p {
+  text-align: justify;
 }
 </style>
 

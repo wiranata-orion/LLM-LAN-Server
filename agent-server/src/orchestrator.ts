@@ -18,6 +18,17 @@ interface PreparedContext {
   retrievedChunks: number
 }
 
+/**
+ * Surfaces the user's Yes/No feedback (see MessageBubble.vue) on a retrieved
+ * past exchange directly in the model's context, so a reply the user marked
+ * unhelpful isn't quietly repeated for a similar question later.
+ */
+function describeRating(rating: unknown): string {
+  if (rating === 'good') return ' [User marked this reply as helpful]'
+  if (rating === 'bad') return ' [User marked this reply as NOT helpful - avoid repeating this approach]'
+  return ''
+}
+
 export class AgentOrchestrator {
   constructor(private readonly retriever: Retriever, private readonly memory: MemoryCore) {}
 
@@ -65,7 +76,9 @@ export class AgentOrchestrator {
     const memoryContext = [
       memoryState.rollingSummary ? `Session Summary:\n${memoryState.rollingSummary}` : '',
       memoryState.facts.length ? `Structured Facts:\n${memoryState.facts.map((fact) => `${fact.key}: ${fact.value}`).join('\n')}` : '',
-      memoryResults.length ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}`).join('\n')}` : '',
+      memoryResults.length
+        ? `Relevant Memory:\n${memoryResults.map((item) => `[${item.timestamp}] ${item.sender}: ${item.message}${describeRating(item.metadata?.rating)}`).join('\n')}`
+        : '',
     ].filter(Boolean).join('\n\n')
 
     const messages: ChatMessage[] = [
@@ -92,8 +105,8 @@ export class AgentOrchestrator {
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
-        await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
-        return { message: response.message, toolRounds: round, retrievedChunks }
+        const appended = await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
+        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }
 
       for (const call of toolCalls) {
@@ -125,8 +138,8 @@ export class AgentOrchestrator {
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
-        await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
-        return { message: response.message, toolRounds: round, retrievedChunks }
+        const appended = await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
+        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }
       for (const call of toolCalls) {
         let result: string

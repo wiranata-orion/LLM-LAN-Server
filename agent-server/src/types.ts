@@ -61,4 +61,7 @@ export interface AgentResponse {
   message: ChatMessage
   toolRounds: number
   retrievedChunks: number
+  // The memory-core record id for the assistant's own reply, so the client can
+  // later rate this specific exchange (see MemoryCore.rateMessage).
+  memoryId?: string
 }

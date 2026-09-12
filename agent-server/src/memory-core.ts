@@ -49,6 +49,13 @@ export interface MemoryCore {
   search(query: string, queryEmbedding?: number[] | null, excludeId?: string): Promise<MemorySearchResult[]>
   getCoreProfile(): Promise<string>
   getLayerSnapshot(sessionId: string): Promise<MemoryLayerSnapshot>
+  /**
+   * Records the user's Yes/No feedback on a specific past reply. Future memory
+   * search surfaces this alongside the retrieved exchange (see orchestrator.ts),
+   * so the model can see "this approach was rated unhelpful" for similar
+   * questions instead of repeating the same mistake.
+   */
+  rateMessage(id: string, rating: 'good' | 'bad' | null): Promise<boolean>
   exportJsonl(outputPath: string): Promise<void>
   importJsonl(inputPath: string): Promise<number>
   close(): void
@@ -112,6 +119,8 @@ export class SqliteMemoryCore implements MemoryCore {
   private readonly upsertSummaryStatement: Database.Statement
   private readonly selectSessionFactsStatement: Database.Statement
   private readonly upsertFactStatement: Database.Statement
+  private readonly selectByIdStatement: Database.Statement
+  private readonly updateMetadataStatement: Database.Statement
 
   constructor(private readonly vectorStore: VectorStore) {
     mkdirSync(path.dirname(config.memoryDbPath), { recursive: true })
@@ -195,6 +204,12 @@ export class SqliteMemoryCore implements MemoryCore {
       ON CONFLICT(session_id, scope, key)
       DO UPDATE SET value = excluded.value, confidence = excluded.confidence, updated_at = excluded.updated_at
     `)
+    this.selectByIdStatement = this.database.prepare(
+      'SELECT id, session_id, timestamp, sender, message, metadata FROM conversations WHERE id = ?',
+    )
+    this.updateMetadataStatement = this.database.prepare(
+      'UPDATE conversations SET metadata = ? WHERE id = ?',
+    )
   }
 
   async appendMessage(sender: string, message: string, metadata: Record<string, unknown> = {}): Promise<MemoryRecord> {
@@ -267,6 +282,16 @@ export class SqliteMemoryCore implements MemoryCore {
       .filter((record) => record.semanticScore > 0 || record.keywordScore > 0)
       .sort((left, right) => right.score - left.score)
       .slice(0, config.maxRetrievedChunks)
+  }
+
+  async rateMessage(id: string, rating: 'good' | 'bad' | null): Promise<boolean> {
+    const row = this.selectByIdStatement.get(id) as Record<string, unknown> | undefined
+    if (!row) return false
+    const metadata = parseMetadata(row.metadata)
+    if (rating) metadata.rating = rating
+    else delete metadata.rating
+    this.updateMetadataStatement.run(JSON.stringify(metadata), id)
+    return true
   }
 
   async getCoreProfile(): Promise<string> {

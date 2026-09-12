@@ -70,6 +70,17 @@ export function getModelDisplayName(modelName) {
   return (settings.modelNicknames && settings.modelNicknames[modelName]) || modelName
 }
 
+/** Formats a duration in milliseconds as "3.2s" or "1m 05s", used for the live
+ * generation timer and the final "answered in Xs" label shown after a reply. */
+export function formatDuration(ms) {
+  if (!ms || ms < 0) return '0.0s'
+  const totalSeconds = ms / 1000
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = Math.round(totalSeconds % 60)
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+}
+
 export function applyCustomTheme(customTheme = DEFAULT_SETTINGS.customTheme) {
   const root = document.documentElement
   const colors = {
