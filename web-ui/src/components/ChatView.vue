@@ -67,8 +67,8 @@ onMounted(() => {
   chatInputRef.value?.focusInput()
 })
 
-function handleSend(text) {
-  emit('send', text)
+function handleSend(text, files) {
+  emit('send', text, files)
 }
 
 function handleStop() {

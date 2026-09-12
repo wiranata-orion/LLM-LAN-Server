@@ -17,6 +17,9 @@ import {
   RefreshCw,
   Zap,
   ArrowRightLeft,
+  Wand2,
+  Sparkles,
+  BrainCircuit,
 } from 'lucide-vue-next'
 import {
   getSettings,
@@ -26,7 +29,15 @@ import {
   applyCustomTheme,
   clearCustomThemeContrast,
 } from '../services/api.js'
-import { setMemoryDirectoryHandle } from '../services/memory.js'
+import {
+  refreshChatHistoryStorage,
+  getChatHistoryRootPath,
+  setChatHistoryFolder,
+  clearChatHistoryFolder,
+} from '../services/memory.js'
+import { TASK_CATEGORIES, getDefaultModelMap } from '../services/autoModel.js'
+import { getMemoryStoragePath, setMemoryStoragePath, resetMemoryStoragePath, getChatHistoryStoragePath } from '../services/api.ts'
+import ServerFolderBrowser from './ServerFolderBrowser.vue'
 
 const props = defineProps({
   conversations: {
@@ -37,11 +48,15 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  models: {
+    type: Array,
+    default: () => [],
+  },
 })
 
 const emit = defineEmits(['close', 'save', 'import-data', 'folder-changed'])
 
-// Active tab in Settings: 'engine' | 'ai' | 'theme' | 'storage'
+// Active tab in Settings: 'engine' | 'model' | 'ai' | 'theme' | 'storage'
 const activeTab = ref('engine')
 
 // Settings state
@@ -66,7 +81,154 @@ const customNumCtxPc = ref('')
 
 const temperature = ref(0.7)
 const maxTokens = ref('')
-const selectedStorageDir = ref('')
+
+// ===== Chat History Storage ("Folder Penyimpanan Fisik") =====
+// This only stores raw chat history (not the "real" memory system above), mediated
+// by the agent-server so it can reuse the same folder-browsing UI. Empty path means
+// unconfigured - the web-ui falls back to browser localStorage for chat history.
+const chatHistoryPath = ref('')
+const chatHistoryPathInput = ref('')
+const chatHistoryStatus = ref('checking') // 'checking' | 'ready' | 'offline'
+const isSavingChatHistoryPath = ref(false)
+const showChatHistoryFolderBrowser = ref(false)
+
+async function loadChatHistoryStorage() {
+  chatHistoryStatus.value = 'checking'
+  try {
+    const info = await getChatHistoryStoragePath()
+    chatHistoryPath.value = info.isConfigured ? info.chatHistoryRoot : ''
+    chatHistoryPathInput.value = chatHistoryPath.value
+    // Keep memory.js's cache in sync with what we just confirmed from the server.
+    await refreshChatHistoryStorage()
+    chatHistoryStatus.value = 'ready'
+  } catch (err) {
+    console.error('Failed to load chat history storage path:', err)
+    chatHistoryStatus.value = 'offline'
+  }
+}
+
+function openChatHistoryFolderBrowser() {
+  showChatHistoryFolderBrowser.value = true
+}
+
+async function applyChatHistoryPath(explicitPath) {
+  const nextPath = (explicitPath ?? chatHistoryPathInput.value).trim()
+  if (!nextPath) {
+    showToast('Isi path folder terlebih dahulu.')
+    return
+  }
+  if (nextPath === chatHistoryPath.value) {
+    showToast('Path tersebut sudah dipakai saat ini.')
+    return
+  }
+  showChatHistoryFolderBrowser.value = false
+  isSavingChatHistoryPath.value = true
+  try {
+    const info = await setChatHistoryFolder(nextPath)
+    chatHistoryPath.value = info.isConfigured ? info.chatHistoryRoot : ''
+    chatHistoryPathInput.value = chatHistoryPath.value
+    showToast(`Folder riwayat chat dipindahkan ke "${info.chatHistoryRoot}".`)
+    emit('folder-changed')
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : 'Gagal mengatur folder riwayat chat.')
+  } finally {
+    isSavingChatHistoryPath.value = false
+  }
+}
+
+function handleChatHistoryFolderSelected(path) {
+  applyChatHistoryPath(path)
+}
+
+async function clearChatHistoryFolderSetting() {
+  isSavingChatHistoryPath.value = true
+  try {
+    await clearChatHistoryFolder()
+    chatHistoryPath.value = ''
+    chatHistoryPathInput.value = ''
+    showToast('Riwayat chat dikembalikan ke penyimpanan lokal browser.')
+    emit('folder-changed')
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : 'Gagal mereset folder riwayat chat.')
+  } finally {
+    isSavingChatHistoryPath.value = false
+  }
+}
+
+// ===== Agent Server Memory Location =====
+// The real memory (conversation SQLite + vector store) lives on the agent-server,
+// at whatever folder path it's pointed at. Pointing it at the same folder again
+// later (e.g. the same path on a flashdisk) picks the same memory back up.
+const memoryStoragePath = ref('')
+const memoryStoragePathInput = ref('')
+const memoryStorageIsCustom = ref(false)
+const memoryStorageDefaultPath = ref('')
+const memoryStorageStatus = ref('checking') // 'checking' | 'ready' | 'offline'
+const isSavingMemoryPath = ref(false)
+const showMemoryFolderBrowser = ref(false)
+
+async function loadMemoryStoragePath() {
+  memoryStorageStatus.value = 'checking'
+  try {
+    const info = await getMemoryStoragePath()
+    memoryStoragePath.value = info.memoryRoot
+    memoryStoragePathInput.value = info.memoryRoot
+    memoryStorageIsCustom.value = !!info.isCustom
+    memoryStorageDefaultPath.value = info.defaultMemoryRoot
+    memoryStorageStatus.value = 'ready'
+  } catch (err) {
+    console.error('Failed to load memory storage path:', err)
+    memoryStorageStatus.value = 'offline'
+  }
+}
+
+async function applyMemoryStoragePath(explicitPath) {
+  const nextPath = (explicitPath ?? memoryStoragePathInput.value).trim()
+  if (!nextPath) {
+    showToast('Isi path folder terlebih dahulu.')
+    return
+  }
+  if (nextPath === memoryStoragePath.value) {
+    showToast('Path tersebut sudah dipakai saat ini.')
+    return
+  }
+  isSavingMemoryPath.value = true
+  try {
+    const info = await setMemoryStoragePath(nextPath)
+    memoryStoragePath.value = info.memoryRoot
+    memoryStoragePathInput.value = info.memoryRoot
+    memoryStorageIsCustom.value = !!info.isCustom
+    showToast(`Lokasi ingatan dipindahkan ke "${info.memoryRoot}".`)
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : 'Gagal mengubah lokasi ingatan.')
+  } finally {
+    isSavingMemoryPath.value = false
+  }
+}
+
+function openMemoryFolderBrowser() {
+  showMemoryFolderBrowser.value = true
+}
+
+function handleMemoryFolderSelected(path) {
+  showMemoryFolderBrowser.value = false
+  applyMemoryStoragePath(path)
+}
+
+async function resetMemoryStoragePathToDefault() {
+  isSavingMemoryPath.value = true
+  try {
+    const info = await resetMemoryStoragePath()
+    memoryStoragePath.value = info.memoryRoot
+    memoryStoragePathInput.value = info.memoryRoot
+    memoryStorageIsCustom.value = !!info.isCustom
+    showToast('Lokasi ingatan dikembalikan ke default.')
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : 'Gagal mereset lokasi ingatan.')
+  } finally {
+    isSavingMemoryPath.value = false
+  }
+}
 
 // Ping status states (Real live check, no dummy)
 const isPinging = ref({ pc: false, laptop: false })
@@ -74,6 +236,34 @@ const pingResult = ref({
   pc: null, // { online: true, ms: 12, version: '...' }
   laptop: null,
 })
+
+// ===== Model Auto =====
+const autoModelEnabled = ref(false)
+const autoModelMapLaptop = ref({})
+const autoModelMapPc = ref({})
+
+const activeAutoModelMap = computed(() => (
+  activeEngine.value === 'pc' ? autoModelMapPc.value : autoModelMapLaptop.value
+))
+
+function setAutoModelChoice(category, modelName) {
+  const target = activeEngine.value === 'pc' ? autoModelMapPc : autoModelMapLaptop
+  target.value = { ...target.value, [category]: modelName }
+}
+
+function applyDefaultAutoModelMap() {
+  const defaults = getDefaultModelMap(props.models)
+  if (activeEngine.value === 'pc') {
+    autoModelMapPc.value = { ...defaults }
+  } else {
+    autoModelMapLaptop.value = { ...defaults }
+  }
+  showToast('Pemetaan model default diterapkan untuk ' + (activeEngine.value === 'pc' ? 'PC Server' : 'Laptop') + '.')
+}
+
+function getModelOptionName(model) {
+  return typeof model === 'string' ? model : (model?.name || '')
+}
 
 // Toast notification inside modal
 const modalToast = ref('')
@@ -103,6 +293,8 @@ onMounted(() => {
   if (pcUrl.value && pcUrl.value.trim()) {
     pingEngine('pc')
   }
+  loadMemoryStoragePath()
+  loadChatHistoryStorage()
 })
 
 onUnmounted(() => {
@@ -129,7 +321,10 @@ function loadCurrentSettings() {
   else clearCustomThemeContrast()
   temperature.value = s.temperature !== undefined && s.temperature !== '' ? Number(s.temperature) : 0.7
   maxTokens.value = s.maxTokens ?? ''
-  selectedStorageDir.value = s.storageDirName || ''
+
+  autoModelEnabled.value = !!s.autoModelEnabled
+  autoModelMapLaptop.value = { ...(s.autoModelMapLaptop || {}) }
+  autoModelMapPc.value = { ...(s.autoModelMapPc || {}) }
 
   // Load Context Window for Laptop (RTX 2050 4GB)
   const rawLaptop = s.numCtxLaptop || (s.activeEngine === 'laptop' ? s.numCtx : 2048) || 2048
@@ -357,68 +552,6 @@ function updateCustomColor(name, value) {
   if (theme.value === 'custom') applyCustomTheme(customTheme.value)
 }
 
-// ===== Storage Directory (.json) =====
-let directoryHandle = null
-
-async function pickPhysicalFolder() {
-  if (!('showDirectoryPicker' in window)) {
-    showToast('Browser Anda tidak mendukung File System Access API. Gunakan opsi Export JSON.')
-    return
-  }
-  try {
-    const nextDirectoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
-    const permission = typeof nextDirectoryHandle.requestPermission === 'function'
-      ? await nextDirectoryHandle.requestPermission({ mode: 'readwrite' })
-      : 'granted'
-    if (permission !== 'granted') {
-      showToast('Izin baca/tulis folder ditolak. Memory belum diaktifkan.')
-      return
-    }
-    await nextDirectoryHandle.getDirectoryHandle('conversations', { create: true })
-    directoryHandle = nextDirectoryHandle
-    setMemoryDirectoryHandle(nextDirectoryHandle)
-    selectedStorageDir.value = nextDirectoryHandle.name
-    emit('folder-changed', nextDirectoryHandle)
-    showToast(`Folder "${nextDirectoryHandle.name}" terhubung.`)
-  } catch (err) {
-    if (err.name !== 'AbortError') {
-      console.error('Directory picker error:', err)
-      showToast('Gagal mengakses folder fisik.')
-    }
-  }
-}
-
-async function syncAllToDirectory() {
-  if (!selectedStorageDir.value) {
-    showToast('Pilih folder terlebih dahulu sebelum menyimpan.')
-    return
-  }
-
-  const exportData = {
-    version: '1.0',
-    exportedAt: new Date().toISOString(),
-    folders: props.folders,
-    conversations: props.conversations,
-  }
-
-  // If physical directory handle is available
-  if (directoryHandle) {
-    try {
-      const fileName = `xufruz_chats_${new Date().toISOString().slice(0, 10)}.json`
-      const fileHandle = await directoryHandle.getFileHandle(fileName, { create: true })
-      const writable = await fileHandle.createWritable()
-      await writable.write(JSON.stringify(exportData, null, 2))
-      await writable.close()
-      showToast(`Berhasil disimpan ke folder "${directoryHandle.name}" sebagai ${fileName}`)
-      return
-    } catch (err) {
-      console.error('Error writing to directory handle:', err)
-    }
-  }
-
-  // Fallback direct file download
-  exportJsonFile()
-}
 
 function exportJsonFile() {
   const exportData = {
@@ -484,7 +617,9 @@ function saveSettings() {
     numCtxPc: finalPcCtx,
     temperature: parseFloat(temperature.value),
     maxTokens: maxTokens.value !== '' ? parseInt(maxTokens.value) : '',
-    storageDirName: selectedStorageDir.value,
+    autoModelEnabled: autoModelEnabled.value,
+    autoModelMapLaptop: { ...autoModelMapLaptop.value },
+    autoModelMapPc: { ...autoModelMapPc.value },
   }
 
   saveSettingsToStorage(settings)
@@ -515,6 +650,9 @@ function resetDefaults() {
   customNumCtxPc.value = ''
   temperature.value = DEFAULT_SETTINGS.temperature
   maxTokens.value = DEFAULT_SETTINGS.maxTokens
+  autoModelEnabled.value = DEFAULT_SETTINGS.autoModelEnabled || false
+  autoModelMapLaptop.value = {}
+  autoModelMapPc.value = {}
   showToast('Pengaturan direset ke default. Klik "Simpan Perubahan" untuk menerapkan atau X untuk membatalkan.')
 }
 </script>
@@ -543,6 +681,15 @@ function resetDefaults() {
           >
             <Server :size="15" />
             <span>Mesin & Koneksi</span>
+          </button>
+
+          <button
+            class="tab-btn"
+            :class="{ 'tab-btn--active': activeTab === 'model' }"
+            @click="activeTab = 'model'"
+          >
+            <Wand2 :size="15" />
+            <span>Model Auto</span>
           </button>
 
           <button
@@ -730,6 +877,83 @@ function resetDefaults() {
                 <input v-model="autoFallback" type="checkbox" />
                 <span class="slider round"></span>
               </label>
+            </div>
+          </div>
+
+          <!-- TAB: MODEL AUTO -->
+          <div v-if="activeTab === 'model'" class="tab-pane">
+            <!-- Active Device Indicator -->
+            <div class="active-engine-badge-bar" :class="activeEngine === 'pc' ? 'badge-bar--pc' : 'badge-bar--laptop'">
+              <Server v-if="activeEngine === 'pc'" :size="15" />
+              <Laptop v-else :size="15" />
+              <span class="badge-bar-text">
+                Pemetaan model untuk: <strong>{{ activeEngine === 'pc' ? 'PC (Server)' : 'Laptop (Local)' }}</strong>
+              </span>
+            </div>
+
+            <div class="section-title-group">
+              <span class="section-title">Model Auto</span>
+              <span class="section-desc">
+                Biarkan sistem otomatis memilih model paling cocok untuk tiap pesan berdasarkan kategori tugasnya.
+                Saat aktif, pemilihan model manual di sidebar akan dinonaktifkan.
+              </span>
+            </div>
+
+            <!-- Enable Toggle -->
+            <div class="setting-toggle-box glass">
+              <div class="toggle-info">
+                <div class="toggle-title-row">
+                  <Wand2 :size="15" class="toggle-icon" />
+                  <span class="toggle-title">Aktifkan Mode Otomatis</span>
+                </div>
+                <span class="toggle-desc">
+                  Saat aktif, tiap pesan diproses memakai model yang dipetakan pada kategori tugasnya di bawah ini.
+                  Selektor model di sidebar akan mati (tidak bisa dipilih manual) selama mode ini aktif.
+                </span>
+              </div>
+              <label class="switch">
+                <input v-model="autoModelEnabled" type="checkbox" />
+                <span class="slider round"></span>
+              </label>
+            </div>
+
+            <div class="model-map-header">
+              <p class="form-hint">
+                PC Server dan Laptop punya pemetaan model masing-masing, karena model yang terpasang di tiap perangkat bisa berbeda.
+                Ganti mesin aktif lewat tab "Mesin & Koneksi" untuk mengatur pemetaan perangkat yang lain.
+              </p>
+              <button
+                class="btn btn--secondary btn--compact model-map-default-btn"
+                @click="applyDefaultAutoModelMap"
+                :disabled="models.length === 0"
+                type="button"
+              >
+                <Sparkles :size="13" />
+                Gunakan Default
+              </button>
+            </div>
+
+            <div v-if="models.length === 0" class="section-empty-hint">
+              Tidak ada model terdeteksi di perangkat ini. Pastikan mesin terhubung dan model sudah terpasang di Ollama.
+            </div>
+
+            <div v-else class="model-map-list">
+              <div v-for="cat in TASK_CATEGORIES" :key="cat.id" class="model-map-row">
+                <div class="model-map-info">
+                  <span class="model-map-label">{{ cat.label }}</span>
+                  <span class="model-map-desc">{{ cat.desc }}</span>
+                </div>
+                <select
+                  class="form-input form-input--compact model-map-select"
+                  :value="activeAutoModelMap[cat.id] || ''"
+                  @change="setAutoModelChoice(cat.id, $event.target.value)"
+                >
+                  <option value="">— Pilih model —</option>
+                  <option v-for="m in models" :key="getModelOptionName(m)" :value="getModelOptionName(m)">
+                    {{ getModelOptionName(m) }}
+                  </option>
+                </select>
+              </div>
             </div>
           </div>
 
@@ -1010,11 +1234,13 @@ function resetDefaults() {
           <!-- TAB 4: PENYIMPANAN / MEMORY (.json) -->
           <div v-if="activeTab === 'storage'" class="tab-pane">
             <div class="section-title-group">
-              <span class="section-title">Penyimpanan Memory & Cadangan</span>
-              <span class="section-desc">Pilih folder fisik di Laptop atau Flashdisk untuk menyimpan riwayat chat Anda</span>
+              <span class="section-title">Penyimpanan Riwayat Chat</span>
+              <span class="section-desc">
+                Folder ini hanya menyimpan riwayat percakapan (chat history) di Laptop, bukan sistem memory/ingatan AI yang sesungguhnya.
+              </span>
             </div>
 
-            <!-- Physical Folder Picker Box -->
+            <!-- Physical Folder Picker -->
             <div class="storage-box glass">
               <div class="storage-box-header">
                 <div class="storage-icon-circle">
@@ -1023,18 +1249,134 @@ function resetDefaults() {
                 <div class="storage-header-text">
                   <span class="storage-box-title">Folder Penyimpanan Fisik</span>
                   <span class="storage-box-sub">
-                    {{ selectedStorageDir ? `Folder Terhubung: ${selectedStorageDir}` : 'Belum ada folder fisik yang dipilih' }}
+                    <template v-if="chatHistoryStatus === 'checking'">Memeriksa folder riwayat chat...</template>
+                    <template v-else-if="chatHistoryStatus === 'offline'">Agent-server tidak terhubung.</template>
+                    <template v-else-if="chatHistoryPath">Folder Terhubung: {{ chatHistoryPath }}</template>
+                    <template v-else>Belum ada folder fisik yang dipilih (memakai penyimpanan lokal browser)</template>
                   </span>
                 </div>
               </div>
 
               <div class="storage-actions-row">
-                <button class="btn btn--secondary memory-folder-button" @click="pickPhysicalFolder">
+                <button
+                  class="btn btn--secondary memory-folder-button"
+                  @click="openChatHistoryFolderBrowser"
+                  :disabled="chatHistoryStatus !== 'ready' || isSavingChatHistoryPath"
+                >
                   <Folder :size="14" />
-                  <span>{{ selectedStorageDir ? 'Ganti Folder' : 'Pilih Folder (Laptop / Flashdisk)' }}</span>
+                  <span>{{ chatHistoryPath ? 'Ganti Folder' : 'Pilih Folder (Laptop / Flashdisk)' }}</span>
                 </button>
               </div>
+
+              <details class="memory-path-manual">
+                <summary>Atau ketik path folder secara manual</summary>
+                <div class="memory-path-input-row">
+                  <input
+                    v-model="chatHistoryPathInput"
+                    type="text"
+                    class="form-input form-input--compact"
+                    placeholder="Contoh: D:\chat-history atau /mnt/flashdisk/chat-history"
+                    :disabled="chatHistoryStatus !== 'ready' || isSavingChatHistoryPath"
+                  />
+                  <button
+                    class="btn btn--secondary btn--compact memory-path-apply-btn"
+                    @click="applyChatHistoryPath()"
+                    :disabled="chatHistoryStatus !== 'ready' || isSavingChatHistoryPath"
+                  >
+                    <Save :size="13" />
+                    <span>Terapkan</span>
+                  </button>
+                </div>
+              </details>
+
+              <button
+                v-if="chatHistoryPath"
+                class="btn-link-reset"
+                @click="clearChatHistoryFolderSetting"
+                :disabled="isSavingChatHistoryPath"
+                type="button"
+              >
+                Kembalikan ke penyimpanan lokal browser
+              </button>
             </div>
+
+            <ServerFolderBrowser
+              v-if="showChatHistoryFolderBrowser"
+              :initial-path="chatHistoryPath"
+              @select="handleChatHistoryFolderSelected"
+              @close="showChatHistoryFolderBrowser = false"
+            />
+
+            <!-- Agent Server Memory Location -->
+            <div class="storage-box glass">
+              <div class="storage-box-header">
+                <div class="storage-icon-circle">
+                  <BrainCircuit :size="18" />
+                </div>
+                <div class="storage-header-text">
+                  <span class="storage-box-title">Lokasi Penyimpanan Ingatan (Memory)</span>
+                  <span class="storage-box-sub">
+                    <template v-if="memoryStorageStatus === 'checking'">Memeriksa lokasi ingatan...</template>
+                    <template v-else-if="memoryStorageStatus === 'offline'">Agent-server tidak terhubung.</template>
+                    <template v-else>{{ memoryStoragePath }}</template>
+                  </span>
+                </div>
+              </div>
+
+              <p class="form-hint">
+                Ini adalah lokasi ingatan AI yang sesungguhnya (riwayat percakapan + vector store) di agent-server, terpisah dari folder riwayat chat di atas.
+                Arahkan ke folder yang sama setiap saat (misalnya folder yang sama di flashdisk) agar ingatan tetap berlanjut ke mana pun folder itu dipindahkan.
+              </p>
+
+              <div class="storage-actions-row">
+                <button
+                  class="btn btn--secondary memory-folder-button"
+                  @click="openMemoryFolderBrowser"
+                  :disabled="memoryStorageStatus !== 'ready' || isSavingMemoryPath"
+                >
+                  <Folder :size="14" />
+                  <span>{{ memoryStorageIsCustom ? 'Ganti Folder' : 'Pilih Folder' }}</span>
+                </button>
+              </div>
+
+              <details class="memory-path-manual">
+                <summary>Atau ketik path folder secara manual</summary>
+                <div class="memory-path-input-row">
+                  <input
+                    v-model="memoryStoragePathInput"
+                    type="text"
+                    class="form-input form-input--compact"
+                    placeholder="Contoh: D:\ai-memory atau /mnt/flashdisk/ai-memory"
+                    :disabled="memoryStorageStatus !== 'ready' || isSavingMemoryPath"
+                  />
+                  <button
+                    class="btn btn--secondary btn--compact memory-path-apply-btn"
+                    @click="applyMemoryStoragePath()"
+                    :disabled="memoryStorageStatus !== 'ready' || isSavingMemoryPath"
+                  >
+                    <Save :size="13" />
+                    <span>Terapkan</span>
+                  </button>
+                </div>
+              </details>
+
+              <button
+                v-if="memoryStorageIsCustom"
+                class="btn-link-reset"
+                @click="resetMemoryStoragePathToDefault"
+                :disabled="isSavingMemoryPath"
+                type="button"
+              >
+                Kembalikan ke lokasi default ({{ memoryStorageDefaultPath }})
+              </button>
+            </div>
+
+            <ServerFolderBrowser
+              v-if="showMemoryFolderBrowser"
+              :initial-path="memoryStoragePath"
+              @select="handleMemoryFolderSelected"
+              @close="showMemoryFolderBrowser = false"
+            />
 
             <!-- Export / Import Buttons
             <div class="export-import-grid">
@@ -1120,7 +1462,7 @@ function resetDefaults() {
 
 <style scoped>
 .settings-modal {
-  width: 580px;
+  width: 720px;
   max-width: 95vw;
   border-radius: 18px;
   overflow: hidden;
@@ -1192,11 +1534,11 @@ function resetDefaults() {
 .settings-tabs {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   padding: 8px 18px 0;
   gap: 6px;
   background: var(--color-bg-primary);
   border-bottom: 1px solid var(--color-border);
-  overflow-x: auto;
 }
 
 .tab-btn {
@@ -1734,6 +2076,67 @@ input:checked + .slider:before {
   color: var(--color-on-bg, var(--color-text-primary));
 }
 
+/* Model Auto: task -> model mapping */
+.model-map-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-map-header .form-hint {
+  flex: 1;
+  margin: 0;
+}
+
+.model-map-default-btn {
+  flex-shrink: 0;
+  width: auto !important;
+  white-space: nowrap;
+}
+
+.model-map-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-map-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+}
+
+.model-map-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.model-map-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.model-map-desc {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  line-height: 1.35;
+}
+
+.model-map-select {
+  flex-shrink: 0;
+  min-width: 180px;
+  max-width: 220px;
+}
+
 /* VRAM Estimate Status Box */
 .vram-estimate-box {
   margin-top: 10px;
@@ -2128,6 +2531,60 @@ input:checked + .slider:before {
 .storage-actions-row {
   display: flex;
   gap: 8px;
+}
+
+.memory-path-manual {
+  font-size: 0.74rem;
+}
+
+.memory-path-manual summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.memory-path-manual summary:hover {
+  color: var(--color-text-secondary);
+}
+
+.memory-path-manual[open] summary {
+  margin-bottom: 8px;
+}
+
+.memory-path-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.memory-path-input-row .form-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.memory-path-apply-btn {
+  flex-shrink: 0;
+  width: auto !important;
+  white-space: nowrap;
+}
+
+.btn-link-reset {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.72rem;
+  color: var(--color-text-accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.btn-link-reset:hover {
+  color: var(--color-accent-hover);
+}
+
+.btn-link-reset:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .memory-folder-button {
