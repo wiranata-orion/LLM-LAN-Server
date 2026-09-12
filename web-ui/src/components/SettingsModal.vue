@@ -665,7 +665,6 @@ function resetDefaults() {
         <div class="modal-header">
           <div class="modal-header-info">
             <h2 class="modal-title">Settings</h2>
-            <span class="modal-subtitle">Konfigurasi Mesin, Parameter AI, Tampilan & Memory</span>
           </div>
           <button class="close-btn" @click="closeModal" id="close-settings-btn" title="Tutup">
             <X :size="18" />
@@ -715,8 +714,8 @@ function resetDefaults() {
             :class="{ 'tab-btn--active': activeTab === 'storage' }"
             @click="activeTab = 'storage'"
           >
-            <Zap :size="15" />
-            <span>Memory</span>
+            <HardDrive :size="15" />
+            <span>Penyimpanan</span>
           </button>
         </div>
 
@@ -734,7 +733,6 @@ function resetDefaults() {
           <div v-if="activeTab === 'engine'" class="tab-pane">
             <div class="section-title-group">
               <span class="section-title">Target Engine Switcher</span>
-              <span class="section-desc">Pilih mesin yang aktif untuk memproses inferensi model AI</span>
             </div>
 
             <!-- Engine Cards Switcher -->
@@ -869,9 +867,6 @@ function resetDefaults() {
                   <Zap :size="15" class="toggle-icon" />
                   <span class="toggle-title">Auto-Fallback Connection</span>
                 </div>
-                <span class="toggle-desc">
-                  Otomatis beralih ke <strong>Laptop</strong> jika koneksi PC Server mati atau kabel LAN terlepas saat chat.
-                </span>
               </div>
               <label class="switch">
                 <input v-model="autoFallback" type="checkbox" />
@@ -882,21 +877,8 @@ function resetDefaults() {
 
           <!-- TAB: MODEL AUTO -->
           <div v-if="activeTab === 'model'" class="tab-pane">
-            <!-- Active Device Indicator -->
-            <div class="active-engine-badge-bar" :class="activeEngine === 'pc' ? 'badge-bar--pc' : 'badge-bar--laptop'">
-              <Server v-if="activeEngine === 'pc'" :size="15" />
-              <Laptop v-else :size="15" />
-              <span class="badge-bar-text">
-                Pemetaan model untuk: <strong>{{ activeEngine === 'pc' ? 'PC (Server)' : 'Laptop (Local)' }}</strong>
-              </span>
-            </div>
-
             <div class="section-title-group">
               <span class="section-title">Model Auto</span>
-              <span class="section-desc">
-                Biarkan sistem otomatis memilih model paling cocok untuk tiap pesan berdasarkan kategori tugasnya.
-                Saat aktif, pemilihan model manual di sidebar akan dinonaktifkan.
-              </span>
             </div>
 
             <!-- Enable Toggle -->
@@ -904,24 +886,19 @@ function resetDefaults() {
               <div class="toggle-info">
                 <div class="toggle-title-row">
                   <Wand2 :size="15" class="toggle-icon" />
-                  <span class="toggle-title">Aktifkan Mode Otomatis</span>
+                  <label class="form-label">
+                    Aktifkan Mode Otomatis &bull &bull;
+                    <span class="active-gpu-label">{{ activeEngine === 'pc' ? 'PC (Server)' : 'Laptop (Local)' }}</span>
+                  </label>
                 </div>
-                <span class="toggle-desc">
-                  Saat aktif, tiap pesan diproses memakai model yang dipetakan pada kategori tugasnya di bawah ini.
-                  Selektor model di sidebar akan mati (tidak bisa dipilih manual) selama mode ini aktif.
-                </span>
               </div>
               <label class="switch">
                 <input v-model="autoModelEnabled" type="checkbox" />
                 <span class="slider round"></span>
               </label>
             </div>
-
+            <span class="section-title">Pengaturan Model</span>
             <div class="model-map-header">
-              <p class="form-hint">
-                PC Server dan Laptop punya pemetaan model masing-masing, karena model yang terpasang di tiap perangkat bisa berbeda.
-                Ganti mesin aktif lewat tab "Mesin & Koneksi" untuk mengatur pemetaan perangkat yang lain.
-              </p>
               <button
                 class="btn btn--secondary btn--compact model-map-default-btn"
                 @click="applyDefaultAutoModelMap"
@@ -959,14 +936,6 @@ function resetDefaults() {
 
           <!-- TAB 2: PARAMETER AI (num_ctx & Temperature) -->
           <div v-if="activeTab === 'ai'" class="tab-pane">
-            <!-- Active Mode Indicator (Info Only, No Switch Button) -->
-            <div class="active-engine-badge-bar" :class="activeEngine === 'pc' ? 'badge-bar--pc' : 'badge-bar--laptop'">
-              <Server v-if="activeEngine === 'pc'" :size="15" />
-              <Laptop v-else :size="15" />
-              <span class="badge-bar-text">
-                Konfigurasi aktif untuk: <strong>{{ activeEngine === 'pc' ? 'PC (Server)' : 'Laptop (Local)' }}</strong>
-              </span>
-            </div>
 
             <!-- Context Window (num_ctx) -->
             <div class="form-group context-window-card">
@@ -975,14 +944,7 @@ function resetDefaults() {
                   Context Window (num_ctx) &bull;
                   <span class="active-gpu-label">{{ activeEngine === 'pc' ? 'PC (Server)' : 'Laptop (Local)' }}</span>
                 </label>
-                <span class="chip-info">Optimasi Token Memori</span>
               </div>
-              <p class="form-hint">
-                {{ activeEngine === 'pc'
-                  ? 'Pilihan preset disesuaikan untuk mode PC (Server) untuk kapasitas percakapan dan dokumen yang maksimal.'
-                  : 'Pilihan preset disesuaikan untuk mode Laptop (Local) agar performa inferensi tetap ringan dan stabil.'
-                }}
-              </p>
 
               <!-- LAPTOP (LOCAL) PRESETS -->
               <div v-if="activeEngine === 'laptop'" class="preset-chips-row">
@@ -1189,7 +1151,6 @@ function resetDefaults() {
           <div v-if="activeTab === 'theme'" class="tab-pane">
             <div class="section-title-group">
               <span class="section-title">Pilih Skema Warna UI</span>
-              <span class="section-desc">Pratinjau langsung aktif saat dipilih. Klik "Simpan Perubahan" untuk menyimpan permanen, atau tombol X untuk membatalkan.</span>
             </div>
 
             <div class="themes-grid">
@@ -1234,10 +1195,7 @@ function resetDefaults() {
           <!-- TAB 4: PENYIMPANAN / MEMORY (.json) -->
           <div v-if="activeTab === 'storage'" class="tab-pane">
             <div class="section-title-group">
-              <span class="section-title">Penyimpanan Riwayat Chat</span>
-              <span class="section-desc">
-                Folder ini hanya menyimpan riwayat percakapan (chat history) di Laptop, bukan sistem memory/ingatan AI yang sesungguhnya.
-              </span>
+              <span class="section-title">Penyimpanan</span>
             </div>
 
             <!-- Physical Folder Picker -->
@@ -1322,11 +1280,6 @@ function resetDefaults() {
                   </span>
                 </div>
               </div>
-
-              <p class="form-hint">
-                Ini adalah lokasi ingatan AI yang sesungguhnya (riwayat percakapan + vector store) di agent-server, terpisah dari folder riwayat chat di atas.
-                Arahkan ke folder yang sama setiap saat (misalnya folder yang sama di flashdisk) agar ingatan tetap berlanjut ke mana pun folder itu dipindahkan.
-              </p>
 
               <div class="storage-actions-row">
                 <button
