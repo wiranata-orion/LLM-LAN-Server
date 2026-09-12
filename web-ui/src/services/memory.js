@@ -1,92 +1,67 @@
 import { checkEnginePing, getApiUrl } from './api.js'
+import {
+  getChatHistoryStoragePath,
+  setChatHistoryStoragePath as apiSetChatHistoryStoragePath,
+  clearChatHistoryStoragePath as apiClearChatHistoryStoragePath,
+  listServerConversations,
+  saveServerConversation,
+  deleteServerConversation,
+  listServerFolders,
+  saveServerFolders,
+  getServerGlobalMemory,
+  saveServerGlobalMemory,
+} from './api.ts'
 
 const EMBEDDING_MODEL = 'nomic-embed-text'
-const CONVERSATIONS_FOLDER = 'conversations'
 const MAX_RETRIEVED_MEMORIES = 5
 const LOCAL_GLOBAL_MEMORY_KEY = 'llm-global-memory'
 const LOCAL_STATE_KEY = 'llm-chat-state'
 
-let selectedDirectoryHandle = null
-let selectedDirectoryName = ''
+// Chat history (conversations + folders + global memory) is mediated by the
+// agent-server so its folder can be picked with the same server-side folder
+// browser used for the memory location - the browser's own File System
+// Access API can't hand a real path to a separate process, only a sandboxed
+// handle. When no folder is configured, everything falls back to
+// localStorage exactly like before this existed.
+let chatHistoryRoot = null
 let cachedGlobalMemory = null
 
-const DIRECTORY_HANDLE_DB = 'xufruz-memory'
-const DIRECTORY_HANDLE_STORE = 'directory-handles'
-const DIRECTORY_HANDLE_KEY = 'selected-directory'
-
-function openDirectoryHandleDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DIRECTORY_HANDLE_DB, 1)
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore(DIRECTORY_HANDLE_STORE)
-    }
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error)
-  })
-}
-
-async function persistDirectoryHandle(handle) {
-  if (!('indexedDB' in window)) return
+/** Re-check with the agent-server which folder (if any) chat history is stored in. */
+export async function refreshChatHistoryStorage() {
   try {
-    const database = await openDirectoryHandleDb()
-    await new Promise((resolve, reject) => {
-      const transaction = database.transaction(DIRECTORY_HANDLE_STORE, 'readwrite')
-      transaction.objectStore(DIRECTORY_HANDLE_STORE).put(handle, DIRECTORY_HANDLE_KEY)
-      transaction.oncomplete = resolve
-      transaction.onerror = () => reject(transaction.error)
-    })
-    database.close()
+    const info = await getChatHistoryStoragePath()
+    chatHistoryRoot = info.isConfigured ? info.chatHistoryRoot : null
   } catch (error) {
-    console.warn('Memory folder handle could not be persisted:', error)
+    console.warn('Could not reach agent-server for chat history storage info:', error)
+    chatHistoryRoot = null
   }
+  return chatHistoryRoot
 }
 
-export async function restoreMemoryDirectoryHandle() {
-  if (!('indexedDB' in window)) return null
-  try {
-    const database = await openDirectoryHandleDb()
-    const handle = await new Promise((resolve, reject) => {
-      const transaction = database.transaction(DIRECTORY_HANDLE_STORE, 'readonly')
-      const request = transaction.objectStore(DIRECTORY_HANDLE_STORE).get(DIRECTORY_HANDLE_KEY)
-      request.onsuccess = () => resolve(request.result || null)
-      request.onerror = () => reject(request.error)
-    })
-    database.close()
-    return handle
-  } catch (error) {
-    console.warn('Memory folder handle could not be restored:', error)
-    return null
-  }
+export function getChatHistoryRootPath() {
+  return chatHistoryRoot
 }
 
-export function setMemoryDirectoryHandle(handle) {
-  if (selectedDirectoryHandle !== handle) {
-    cachedGlobalMemory = null
-  }
-  selectedDirectoryHandle = handle || null
-  selectedDirectoryName = handle?.name || ''
-  if (handle) persistDirectoryHandle(handle)
+export async function setChatHistoryFolder(path) {
+  const info = await apiSetChatHistoryStoragePath(path)
+  chatHistoryRoot = info.isConfigured ? info.chatHistoryRoot : null
+  cachedGlobalMemory = null
+  return info
 }
 
-export function getMemoryDirectoryName() {
-  return selectedDirectoryName
+export async function clearChatHistoryFolder() {
+  const info = await apiClearChatHistoryStoragePath()
+  chatHistoryRoot = null
+  cachedGlobalMemory = null
+  return info
 }
 
-export async function requestMemoryDirectoryPermission() {
-  if (!selectedDirectoryHandle) return false
-  try {
-    const permission = typeof selectedDirectoryHandle.requestPermission === 'function'
-      ? await selectedDirectoryHandle.requestPermission({ mode: 'readwrite' })
-      : 'granted'
-    return permission === 'granted'
-  } catch (error) {
-    console.warn('Memory folder permission could not be restored:', error)
-    return false
-  }
+function isServerStorageActive() {
+  return !!chatHistoryRoot
 }
 
 export async function getMemoryStatus(model) {
-  if (!selectedDirectoryHandle) {
+  if (!isServerStorageActive()) {
     return { ready: false, reason: 'storage-not-selected' }
   }
   if (!model) {
@@ -101,100 +76,56 @@ export async function getMemoryStatus(model) {
   return { ready: true, ping }
 }
 
-async function getMemoryRoot(model, { requireConnection = true } = {}) {
+export async function loadStoredConversations(model, { requireConnection = false } = {}) {
   if (requireConnection) {
     const status = await getMemoryStatus(model)
     if (!status.ready) return null
-  } else if (!selectedDirectoryHandle) {
+  } else if (!isServerStorageActive()) {
     return null
   }
 
   try {
-    let permission = typeof selectedDirectoryHandle.queryPermission === 'function'
-      ? await selectedDirectoryHandle.queryPermission({ mode: 'readwrite' })
-      : 'granted'
-    if (permission === 'prompt' && typeof selectedDirectoryHandle.requestPermission === 'function') {
-      permission = await selectedDirectoryHandle.requestPermission({ mode: 'readwrite' })
-    }
-    if (permission !== 'granted') {
-      console.warn('Memory storage permission was not granted:', permission)
-      return null
-    }
-
-    const root = selectedDirectoryHandle
-    const conversations = await root.getDirectoryHandle(CONVERSATIONS_FOLDER, { create: true })
-    return { root, conversations }
+    const result = await listServerConversations()
+    return (result.conversations || [])
+      .map((stored) => ({
+        id: stored.conversationId,
+        title: stored.title || '',
+        messages: stored.messages,
+        folderId: stored.folderId || null,
+        createdAt: stored.createdAt || stored.updatedAt || new Date().toISOString(),
+      }))
+      .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
   } catch (error) {
-    console.error('Memory storage root could not be opened:', error)
-    throw error
-  }
-}
-
-async function readJsonFile(directory, fileName) {
-  try {
-    const handle = await directory.getFileHandle(fileName)
-    const file = await handle.getFile()
-    return JSON.parse(await file.text())
-  } catch (error) {
-    if (error.name !== 'NotFoundError') console.error(`Failed to read ${fileName}:`, error)
+    console.error('Failed to load conversations from agent-server:', error)
     return null
   }
-}
-
-export async function loadStoredConversations(model, { requireConnection = false } = {}) {
-  const directories = await getMemoryRoot(model, { requireConnection })
-  if (!directories) return null
-
-  const conversations = []
-  for (const fileName of await listConversationFiles(directories.conversations)) {
-    const stored = await readJsonFile(directories.conversations, fileName)
-    if (!stored?.conversationId || !Array.isArray(stored.messages)) continue
-    conversations.push({
-      id: stored.conversationId,
-      title: stored.title || '',
-      messages: stored.messages,
-      folderId: stored.folderId || null,
-      createdAt: stored.createdAt || stored.updatedAt || new Date().toISOString(),
-    })
-  }
-
-  return conversations.sort((left, right) => (
-    new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
-  ))
 }
 
 export async function loadStoredFolders(model) {
-  const directories = await getMemoryRoot(model, { requireConnection: false })
-  if (!directories) return null
-  const stored = await readJsonFile(directories.root, 'folders.json')
-  return Array.isArray(stored) ? stored : []
+  if (!isServerStorageActive()) return null
+  try {
+    const result = await listServerFolders()
+    return result.folders || []
+  } catch (error) {
+    console.error('Failed to load folders from agent-server:', error)
+    return null
+  }
 }
 
 export async function saveStoredFolders(folders, model) {
-  const directories = await getMemoryRoot(model, { requireConnection: false })
-  if (!directories) return false
-  await writeJsonFile(directories.root, 'folders.json', folders.map((folder) => ({
-    id: folder.id,
-    name: folder.name,
-    parentId: folder.parentId || null,
-    isExpanded: folder.isExpanded !== false,
-    createdAt: folder.createdAt,
-  })))
-  return true
-}
-
-async function writeJsonFile(directory, fileName, value) {
-  const handle = await directory.getFileHandle(fileName, { create: true })
-  const writable = await handle.createWritable()
-  await writable.write(JSON.stringify(value, null, 2))
-  await writable.close()
-}
-
-async function deleteJsonFile(directory, fileName) {
+  if (!isServerStorageActive()) return false
   try {
-    await directory.removeEntry(fileName)
+    await saveServerFolders(folders.map((folder) => ({
+      id: folder.id,
+      name: folder.name,
+      parentId: folder.parentId || null,
+      isExpanded: folder.isExpanded !== false,
+      createdAt: folder.createdAt,
+    })))
+    return true
   } catch (error) {
-    if (error.name !== 'NotFoundError') throw error
+    console.error('Failed to save folders to agent-server:', error)
+    return false
   }
 }
 
@@ -213,28 +144,16 @@ function readLocalGlobalMemory() {
   try {
     const saved = localStorage.getItem(LOCAL_GLOBAL_MEMORY_KEY)
     if (!saved) {
-      return {
-        profile: {},
-        preferences: {},
-        permanent_instructions: [],
-        interactions: [],
-      }
+      return { permanent_instructions: [], interactions: [] }
     }
     const parsed = JSON.parse(saved)
     return {
-      profile: parsed.profile || {},
-      preferences: parsed.preferences || {},
       permanent_instructions: Array.isArray(parsed.permanent_instructions) ? parsed.permanent_instructions : [],
       interactions: Array.isArray(parsed.interactions) ? parsed.interactions : [],
     }
   } catch (error) {
     console.warn('Failed to parse local global memory:', error)
-    return {
-      profile: {},
-      preferences: {},
-      permanent_instructions: [],
-      interactions: [],
-    }
+    return { permanent_instructions: [], interactions: [] }
   }
 }
 
@@ -242,23 +161,19 @@ function writeLocalGlobalMemory(memory) {
   localStorage.setItem(LOCAL_GLOBAL_MEMORY_KEY, JSON.stringify(memory))
 }
 
-async function readGlobalMemory(root) {
-  if (!root) {
+async function readGlobalMemory() {
+  if (!isServerStorageActive()) {
     const localMemory = readLocalGlobalMemory()
     cachedGlobalMemory = localMemory
     return localMemory
   }
-
-  const storedMemory = await readJsonFile(root, 'global_memory.json')
-  if (storedMemory) {
-    cachedGlobalMemory = storedMemory
-    return storedMemory
-  }
-  return {
-    profile: {},
-    preferences: {},
-    permanent_instructions: [],
-    interactions: [],
+  try {
+    const result = await getServerGlobalMemory()
+    cachedGlobalMemory = result.memory
+    return result.memory
+  } catch (error) {
+    console.warn('Failed to read global memory from agent-server; using local fallback:', error)
+    return readLocalGlobalMemory()
   }
 }
 
@@ -320,29 +235,25 @@ function keywordSimilarity(query, text) {
   return matches / queryWords.size
 }
 
-async function listConversationFiles(directory) {
-  const files = []
-  for await (const [name, handle] of directory.entries()) {
-    if (handle.kind === 'file' && name.endsWith('.json')) files.push(name)
-  }
-  return files
-}
-
 export async function retrieveRelevantMemories(query, model, limit = MAX_RETRIEVED_MEMORIES) {
   if (!query.trim()) return []
 
-  const directories = await getMemoryRoot(model)
+  let usingServerStorage = isServerStorageActive()
   let conversations = []
 
-  if (directories) {
-    const files = await listConversationFiles(directories.conversations)
-    for (const fileName of files) {
-      const conversation = await readJsonFile(directories.conversations, fileName)
-      if (conversation?.messages?.length) {
-        conversations.push({ fileName, conversation })
-      }
+  if (usingServerStorage) {
+    try {
+      const result = await listServerConversations()
+      conversations = (result.conversations || []).map((conversation) => ({
+        fileName: conversation.conversationId,
+        conversation,
+      }))
+    } catch (error) {
+      console.warn('Failed to list conversations from agent-server for retrieval; using local fallback:', error)
+      usingServerStorage = false
     }
-  } else {
+  }
+  if (!usingServerStorage) {
     const state = readLocalState()
     conversations = (state.conversations || []).map((conversation) => ({
       fileName: conversation.id,
@@ -359,18 +270,25 @@ export async function retrieveRelevantMemories(query, model, limit = MAX_RETRIEV
 
   const results = []
   for (const { fileName, conversation } of conversations) {
-    const text = conversation.messages
+    const text = (conversation.messages || [])
       .filter((message) => message.content)
       .map((message) => `${message.role}: ${message.content}`)
       .join('\n')
     if (!text) continue
 
     let embedding = conversation.embedding
-    if (directories && queryEmbedding && (!Array.isArray(embedding) || !embedding.length)) {
+    if (usingServerStorage && queryEmbedding && (!Array.isArray(embedding) || !embedding.length)) {
       try {
         embedding = await createEmbedding(text)
-        conversation.embedding = embedding
-        await writeJsonFile(directories.conversations, fileName, conversation)
+        // Cache it server-side so future searches don't re-embed this conversation.
+        await saveServerConversation({
+          conversationId: conversation.conversationId,
+          title: conversation.title,
+          folderId: conversation.folderId,
+          createdAt: conversation.createdAt,
+          messages: conversation.messages,
+          embedding,
+        })
       } catch (error) {
         console.warn(`Embedding skipped for ${fileName}; using keyword retrieval:`, error)
       }
@@ -389,10 +307,8 @@ export async function retrieveRelevantMemories(query, model, limit = MAX_RETRIEV
 
 export async function buildMemoryMessages({ query, model }) {
   try {
-    const directories = await getMemoryRoot(model)
-
     const messages = []
-    const globalMemory = await readGlobalMemory(directories?.root || null)
+    const globalMemory = await readGlobalMemory()
     const globalText = globalMemoryToText(globalMemory)
     if (globalText) {
       messages.push({
@@ -416,12 +332,9 @@ export async function buildMemoryMessages({ query, model }) {
 }
 
 export async function saveConversation(conversation, model) {
-  // A successful chat request already proves the active model is usable.
-  // Do not let a separate health endpoint block archiving the completed chat.
-  const directories = await getMemoryRoot(model, { requireConnection: false })
   if (!conversation?.id) throw new Error('Conversation ID is missing')
 
-  const currentMemory = await readGlobalMemory(directories?.root || null)
+  const currentMemory = await readGlobalMemory()
   const interactions = [
     ...(currentMemory.interactions || []).filter((item) => item.conversationId !== conversation.id),
     ...normalizeInteractions(conversation),
@@ -433,34 +346,36 @@ export async function saveConversation(conversation, model) {
   }
   cachedGlobalMemory = updatedMemory
 
-  if (!directories) {
+  if (!isServerStorageActive()) {
     writeLocalGlobalMemory(updatedMemory)
     return true
   }
 
-  const fileName = await getConversationFileName(directories.conversations, conversation)
-  const messages = conversation.messages || []
-  await writeJsonFile(directories.conversations, fileName, {
-    version: 1,
-    conversationId: conversation.id,
-    title: conversation.title || '',
-    folderId: conversation.folderId || null,
-    createdAt: conversation.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    messages,
-    embedding: null,
-  })
-
-  await writeJsonFile(directories.root, 'global_memory.json', updatedMemory)
-  console.info(`Conversation memory saved: ${fileName}`)
-  return true
+  try {
+    // A regular save always resets any cached embedding: the messages just
+    // changed, so a previously cached embedding of the old text is stale.
+    await saveServerConversation({
+      conversationId: conversation.id,
+      title: conversation.title || '',
+      folderId: conversation.folderId || null,
+      createdAt: conversation.createdAt || new Date().toISOString(),
+      messages: conversation.messages || [],
+      embedding: null,
+    })
+    await saveServerGlobalMemory(updatedMemory)
+    console.info(`Conversation memory saved: ${conversation.id}`)
+    return true
+  } catch (error) {
+    console.error('Failed to save conversation to agent-server; falling back to local storage for this save:', error)
+    writeLocalGlobalMemory(updatedMemory)
+    return false
+  }
 }
 
 export async function deleteConversation(conversation, model) {
-  const directories = await getMemoryRoot(model, { requireConnection: false })
   if (!conversation?.id) return false
 
-  if (!directories) {
+  if (!isServerStorageActive()) {
     const currentMemory = readLocalGlobalMemory()
     const interactions = (currentMemory.interactions || [])
       .filter((item) => item.conversationId !== conversation.id)
@@ -474,47 +389,22 @@ export async function deleteConversation(conversation, model) {
     return true
   }
 
-  for (const fileName of await listConversationFiles(directories.conversations)) {
-    const stored = await readJsonFile(directories.conversations, fileName)
-    if (stored?.conversationId === conversation.id) {
-      await deleteJsonFile(directories.conversations, fileName)
-      break
-    }
+  try {
+    await deleteServerConversation(conversation.id)
+    const currentMemory = await readGlobalMemory()
+    const interactions = (currentMemory.interactions || [])
+      .filter((item) => item.conversationId !== conversation.id)
+    const updatedMemory = { ...currentMemory, interactions, updatedAt: new Date().toISOString() }
+    await saveServerGlobalMemory(updatedMemory)
+    cachedGlobalMemory = updatedMemory
+    return true
+  } catch (error) {
+    console.error('Failed to delete conversation from agent-server:', error)
+    return false
   }
-
-  const currentMemory = await readGlobalMemory(directories.root)
-  const interactions = (currentMemory.interactions || [])
-    .filter((item) => item.conversationId !== conversation.id)
-  await writeJsonFile(directories.root, 'global_memory.json', {
-    ...currentMemory,
-    interactions,
-    updatedAt: new Date().toISOString(),
-  })
-  cachedGlobalMemory = { ...currentMemory, interactions }
-  return true
-}
-
-async function getConversationFileName(directory, conversation) {
-  const safeId = conversation.id.replace(/[^a-zA-Z0-9_-]/g, '_')
-
-  for (const fileName of await listConversationFiles(directory)) {
-    const stored = await readJsonFile(directory, fileName)
-    if (stored?.conversationId === conversation.id) return fileName
-  }
-
-  const usedNumbers = new Set()
-  for (const fileName of await listConversationFiles(directory)) {
-    const match = fileName.match(/^conv_(\d+)(?:_|\.json$)/)
-    if (match) usedNumbers.add(Number(match[1]))
-  }
-
-  let number = 1
-  while (usedNumbers.has(number)) number += 1
-  return `conv_${String(number).padStart(3, '0')}_${safeId}.json`
 }
 
 export async function saveGlobalMemory(memory, model) {
-  const directories = await getMemoryRoot(model, { requireConnection: false })
   const updatedMemory = {
     permanent_instructions: memory?.permanent_instructions || [],
     interactions: memory?.interactions || [],
@@ -522,12 +412,11 @@ export async function saveGlobalMemory(memory, model) {
   }
   cachedGlobalMemory = updatedMemory
 
-  if (!directories) {
+  if (!isServerStorageActive()) {
     writeLocalGlobalMemory(updatedMemory)
     return true
   }
 
-  await writeJsonFile(directories.root, 'global_memory.json', updatedMemory)
+  await saveServerGlobalMemory(updatedMemory)
   return true
 }
-

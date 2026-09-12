@@ -18,6 +18,7 @@ import {
   FolderInput,
   AlertCircle,
   EllipsisVertical,
+  Wand2,
 } from 'lucide-vue-next'
 
 import FolderItem from './FolderItem.vue'
@@ -43,6 +44,20 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  modelNicknames: {
+    type: Object,
+    default: () => ({}),
+  },
+  autoModelEnabled: {
+    type: Boolean,
+    default: false,
+  },
+  // Whichever model Model Auto actually used for the most recent message,
+  // so the sidebar reflects reality instead of a stale manual pick.
+  autoModelActiveModel: {
+    type: String,
+    default: '',
+  },
   isOpen: {
     type: Boolean,
     default: true,
@@ -61,6 +76,7 @@ const emit = defineEmits([
   'move-folder',
   'move-chat',
   'select-model',
+  'rename-model',
   'open-settings',
   'toggle-sidebar',
 ])
@@ -68,7 +84,10 @@ const emit = defineEmits([
 // ===== Model Dropdown =====
 const showModelDropdown = ref(false)
 
+// Model Auto picks the model per message automatically, so manual selection
+// in the sidebar is disabled while it's on (kept in sync via selectedModelDisplay).
 function toggleModelDropdown() {
+  if (props.autoModelEnabled) return
   showModelDropdown.value = !showModelDropdown.value
 }
 
@@ -81,16 +100,60 @@ function getModelName(model) {
   return typeof model === 'string' ? model : (model.name || '')
 }
 
-function getModelBadge(model) {
+function getModelSizeLabel(model) {
   if (typeof model === 'string') return ''
   if (model.desc) return model.desc
   if (model.size) return (model.size / 1e9).toFixed(1) + 'GB'
   return ''
 }
 
+// The badge next to each model used to only ever show its GB size. It can now
+// be replaced with a custom nickname the user sets (see startEditModel below);
+// the GB size still shows as a tooltip so that information isn't lost.
+function getModelBadge(model) {
+  const name = getModelName(model)
+  const nickname = props.modelNicknames?.[name]
+  if (nickname) return nickname
+  return getModelSizeLabel(model)
+}
+
+function getModelDisplayName(modelName) {
+  return props.modelNicknames?.[modelName] || modelName
+}
+
 const selectedModelDisplay = computed(() => {
-  return props.selectedModel || 'Select Model'
+  // While Model Auto is on, show whichever model it actually used most
+  // recently instead of the (now inactive) manual selection.
+  const name = props.autoModelEnabled
+    ? (props.autoModelActiveModel || props.selectedModel)
+    : props.selectedModel
+  if (!name) return props.autoModelEnabled ? 'Menunggu pesan pertama...' : 'Select Model'
+  return getModelDisplayName(name)
 })
+
+// ===== Model Nickname (rename the badge shown in the sidebar) =====
+const editingModelName = ref(null)
+const editingModelNickname = ref('')
+
+function startEditModel(model, e) {
+  if (e) e.stopPropagation()
+  const name = getModelName(model)
+  editingModelName.value = name
+  editingModelNickname.value = props.modelNicknames?.[name] || ''
+}
+
+function saveModelNickname(e) {
+  if (e) e.stopPropagation()
+  if (editingModelName.value) {
+    emit('rename-model', editingModelName.value, editingModelNickname.value.trim())
+  }
+  editingModelName.value = null
+}
+
+function cancelEditModel(e) {
+  if (e) e.stopPropagation()
+  editingModelName.value = null
+}
 
 // ===== Conversation Title Helper =====
 function getConversationTitle(conv) {
@@ -377,8 +440,17 @@ onUnmounted(() => {
 
     <!-- Model Selector -->
     <div class="model-selector-wrapper">
-      <button class="model-selector" @click="toggleModelDropdown" id="model-selector-btn">
-        <span class="model-name">{{ selectedModelDisplay }}</span>
+      <button
+        class="model-selector"
+        :class="{ 'model-selector--disabled': autoModelEnabled }"
+        :disabled="autoModelEnabled"
+        @click="toggleModelDropdown"
+        id="model-selector-btn"
+        :title="autoModelEnabled ? 'Model dipilih otomatis oleh Model Auto. Nonaktifkan di Settings > Model Auto untuk memilih manual.' : ''"
+      >
+        <Wand2 v-if="autoModelEnabled" :size="13" class="auto-model-icon" title="Model Auto aktif" />
+        <span class="model-name" :title="autoModelEnabled ? (autoModelActiveModel || selectedModel) : selectedModel">{{ selectedModelDisplay }}</span>
+        <span v-if="autoModelEnabled" class="auto-model-badge">AUTO</span>
         <ChevronDown :size="14" :class="{ rotated: showModelDropdown }" />
       </button>
 
@@ -390,18 +462,49 @@ onUnmounted(() => {
           >
             No models
           </div>
-          <button
+          <div
             v-for="model in models"
             :key="getModelName(model)"
-            class="model-option"
-            :class="{ 'model-option--active': getModelName(model) === selectedModel }"
-            @click="selectModel(getModelName(model))"
+            class="model-option-row"
+            :class="{ 'model-option-row--active': getModelName(model) === selectedModel }"
           >
-            <span class="model-option-name">{{ getModelName(model) }}</span>
-            <span v-if="getModelBadge(model)" class="model-option-badge">
-              {{ getModelBadge(model) }}
-            </span>
-          </button>
+            <!-- Editing this model's nickname -->
+            <div v-if="editingModelName === getModelName(model)" class="model-nickname-edit" @click.stop>
+              <input
+                v-model="editingModelNickname"
+                @keydown.enter="saveModelNickname"
+                @keydown.esc="cancelEditModel"
+                class="model-nickname-input"
+                :placeholder="getModelSizeLabel(model) || 'Nama tampilan...'"
+                autofocus
+              />
+              <button class="btn-micro btn-micro--confirm" @click="saveModelNickname" title="Simpan">
+                <Check :size="11" />
+              </button>
+              <button class="btn-micro btn-micro--cancel" @click="cancelEditModel" title="Batal">
+                <X :size="11" />
+              </button>
+            </div>
+
+            <template v-else>
+              <button
+                class="model-option"
+                @click="selectModel(getModelName(model))"
+              >
+                <span class="model-option-name" :title="getModelName(model)">{{ getModelName(model) }}</span>
+                <span v-if="getModelBadge(model)" class="model-option-badge" :title="getModelSizeLabel(model)">
+                  {{ getModelBadge(model) }}
+                </span>
+              </button>
+              <button
+                class="model-rename-btn"
+                @click="startEditModel(model, $event)"
+                title="Beri nama tampilan untuk model ini"
+              >
+                <Pencil :size="12" />
+              </button>
+            </template>
+          </div>
         </div>
       </Transition>
     </div>
@@ -770,6 +873,17 @@ onUnmounted(() => {
   border-color: var(--color-border-light);
 }
 
+.model-selector--disabled {
+  cursor: not-allowed;
+  background: var(--color-bg-secondary);
+  border-style: dashed;
+  border-color: var(--color-accent-subtle);
+}
+
+.model-selector--disabled:hover {
+  border-color: var(--color-accent-subtle);
+}
+
 .model-label {
   font-size: 0.7rem;
   color: var(--color-text-muted);
@@ -808,11 +922,44 @@ onUnmounted(() => {
   overflow-y: auto;
 }
 
+.auto-model-icon {
+  color: var(--color-text-accent);
+  flex-shrink: 0;
+}
+
+.auto-model-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-text-accent);
+  background: var(--color-accent-subtle);
+  border: 1px solid var(--color-accent);
+  padding: 1px 5px;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+
+.model-option-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+}
+
+.model-option-row:hover {
+  background: var(--color-bg-hover);
+}
+
+.model-option-row--active {
+  background: var(--color-accent-subtle);
+}
+
 .model-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 8px 12px;
   border: none;
   background: none;
@@ -825,13 +972,7 @@ onUnmounted(() => {
   text-align: left;
 }
 
-.model-option:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-.model-option--active {
-  background: var(--color-accent-subtle);
+.model-option-row--active .model-option {
   color: var(--color-text-accent);
 }
 
@@ -839,6 +980,13 @@ onUnmounted(() => {
   cursor: default;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+.model-option-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .model-option-size,
@@ -850,11 +998,59 @@ onUnmounted(() => {
   border-radius: 6px;
   font-weight: 500;
   white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 
-.model-option--active .model-option-badge {
+.model-option-row--active .model-option-badge {
   color: var(--color-text-accent);
   background: var(--color-accent-subtle);
+}
+
+.model-rename-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 5px;
+  margin-right: 4px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.15s ease;
+}
+
+.model-option-row:hover .model-rename-btn {
+  opacity: 1;
+}
+
+.model-rename-btn:hover {
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.model-nickname-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 4px 6px;
+}
+
+.model-nickname-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-accent);
+  color: var(--color-text-primary);
+  font-size: 0.78rem;
+  font-family: var(--font-sans);
+  border-radius: 5px;
+  padding: 5px 8px;
+  outline: none;
 }
 
 /* Conversation List */

@@ -4,8 +4,9 @@ import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
-import { getModels, getSettings, saveSettingsToStorage, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
-import { sendMessageStream as sendAgentMessageStream } from './services/api.ts'
+import { getModels, getSettings, saveSettingsToStorage, setModelNickname, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
+import { sendMessageStream as sendAgentMessageStream, uploadDocument } from './services/api.ts'
+import { resolveAutoModel } from './services/autoModel.js'
 import {
   loadStoredConversations,
   deleteConversation,
@@ -13,6 +14,8 @@ import {
   saveConversation,
   saveStoredFolders,
   buildMemoryMessages,
+  refreshChatHistoryStorage,
+  getChatHistoryRootPath,
 } from './services/memory.js'
 
 // ===== State =====
@@ -57,11 +60,6 @@ function handleEngineFallback(e) {
 
 // ===== Lifecycle =====
 onMounted(async () => {
-  const restoredDirectoryHandle = await restoreMemoryDirectoryHandle()
-  if (restoredDirectoryHandle) {
-    setMemoryDirectoryHandle(restoredDirectoryHandle)
-  }
-
   // Load saved state
   loadState({
     // Keep the last known sidebar visible while physical storage permission is restored.
@@ -82,13 +80,15 @@ onMounted(async () => {
   // Fetch real models
   await fetchModels()
 
-  const settings = getSettings()
-  if (settings.storageDirName) {
+  // Chat history storage lives on the agent-server now (see Settings > Memory);
+  // ask it whether a folder is configured before deciding to use it or fall
+  // back to the existing local-chat behavior.
+  const chatHistoryRoot = await refreshChatHistoryStorage()
+  if (chatHistoryRoot) {
     await loadSelectedDirectoryState()
   }
 
-  // Keep the existing local-chat behavior only when physical storage is not active.
-  if (!settings.storageDirName && conversations.length === 0) {
+  if (!chatHistoryRoot && conversations.length === 0) {
     createNewChat()
   }
 })
@@ -268,6 +268,7 @@ function moveChatToFolder(chatId, targetFolderId) {
 
 // ===== Messaging =====
 
+const attachToast = ref('')
 
 function stopGeneration() {
   if (abortController) {
@@ -277,8 +278,23 @@ function stopGeneration() {
   }
 }
 
+// Ingest any files attached from the "+" menu in ChatInput into the agent-server's
+// RAG store, so the very next message can already be answered using their content.
+async function ingestAttachedFiles(files) {
+  const results = []
+  for (const file of files) {
+    try {
+      const result = await uploadDocument(file)
+      results.push({ file, ok: true, chunks: result.chunks })
+    } catch (error) {
+      results.push({ file, ok: false, error: error instanceof Error ? error.message : 'Gagal mengunggah file' })
+    }
+  }
+  return results
+}
+
 // Send a user message and trigger assistant response
-async function sendMessage(text) {
+async function sendMessage(text, files = []) {
   if (isGenerating.value) return
   if (!activeConversation.value) createNewChat()
 
@@ -291,15 +307,30 @@ async function sendMessage(text) {
     return
   }
 
+  let ingestResults = []
+  if (files && files.length) {
+    ingestResults = await ingestAttachedFiles(files)
+    const failed = ingestResults.filter((r) => !r.ok)
+    if (failed.length) {
+      attachToast.value = `Gagal menambahkan ${failed.length} file ke memory: ${failed.map((f) => f.file.name).join(', ')}`
+      setTimeout(() => { attachToast.value = '' }, 5000)
+    }
+  }
+
+  const attachedNote = ingestResults.filter((r) => r.ok).map((r) => `📎 ${r.file.name}`).join('\n')
+  const fullText = attachedNote ? `${attachedNote}${text ? `\n\n${text}` : ''}` : text
+
   // Add user message
   activeConversation.value.messages.push({
     role: 'user',
-    content: text,
+    content: fullText,
+    hasAttachment: ingestResults.some((r) => r.ok) || undefined,
   })
 
   // Set title from first message
   if (!activeConversation.value.title) {
-    activeConversation.value.title = text.substring(0, 50) + (text.length > 50 ? '...' : '')
+    const titleSource = text || attachedNote
+    activeConversation.value.title = titleSource.substring(0, 50) + (titleSource.length > 50 ? '...' : '')
   }
 
   // Save immediately so retrieval cannot delay or prevent persistence of the user message.
@@ -325,28 +356,53 @@ function handleRegenerate() {
   generateAssistantResponse()
 }
 
+// Model Auto: when enabled, pick the model for THIS message based on the
+// detected task category instead of always using the manually selected model.
+function resolveModelForMessage(latestUserContent, hasAttachment) {
+  const settings = getSettings()
+  if (!settings.autoModelEnabled) {
+    return { model: selectedModel.value, category: null }
+  }
+  const map = settings.activeEngine === 'pc' ? settings.autoModelMapPc : settings.autoModelMapLaptop
+  const { model, category } = resolveAutoModel({
+    text: latestUserContent,
+    hasAttachment,
+    map,
+    availableModels: models.value,
+    fallbackModel: selectedModel.value,
+  })
+  return { model: model || selectedModel.value, category }
+}
+
 async function generateAssistantResponse() {
   const conv = activeConversation.value
   if (!conv) return
+
+  const conversationMessages = conv.messages.map(m => ({ role: m.role, content: m.content }))
+  const latestUserMessage = conversationMessages[conversationMessages.length - 1]
+  const latestRawMessage = conv.messages[conv.messages.length - 1]
+  const history = conversationMessages.slice(0, -1)
+
+  const { model: modelForThisMessage } = resolveModelForMessage(
+    latestUserMessage?.content || '',
+    !!latestRawMessage?.hasAttachment,
+  )
+  // Keep the sidebar in sync with whichever model Model Auto actually picked.
+  autoModelActiveModel.value = modelForThisMessage
+
   // Add empty assistant message for streaming
   conv.messages.push({
     role: 'assistant',
     content: '',
-    model: selectedModel.value,
+    model: modelForThisMessage,
   })
   const assistantIdx = conv.messages.length - 1
   isGenerating.value = true
 
-  const conversationMessages = conv.messages
-    .slice(0, -1)
-    .map(m => ({ role: m.role, content: m.content }))
-
-  const latestUserMessage = conversationMessages[conversationMessages.length - 1]
-  const history = conversationMessages.slice(0, -1)
   const memoryMessages = latestUserMessage?.content
     ? await buildMemoryMessages({
         query: latestUserMessage.content,
-        model: selectedModel.value,
+        model: modelForThisMessage,
       })
     : []
 
@@ -355,7 +411,7 @@ async function generateAssistantResponse() {
     await sendAgentMessageStream(
       latestUserMessage?.content || '',
       [...memoryMessages, ...history],
-      selectedModel.value,
+      modelForThisMessage,
       abortController.signal,
       conv.id,
       (token) => {
@@ -369,7 +425,7 @@ async function generateAssistantResponse() {
   } finally {
     isGenerating.value = false
     abortController = null
-    saveConversation(conv, selectedModel.value).catch((error) => {
+    saveConversation(conv, modelForThisMessage).catch((error) => {
       console.error('Conversation memory final save failed:', error)
     })
     saveState()
@@ -380,6 +436,17 @@ async function generateAssistantResponse() {
 function selectModel(modelName) {
   selectedModel.value = modelName
   saveState()
+}
+
+const modelNicknames = ref(getSettings().modelNicknames || {})
+const autoModelEnabled = ref(getSettings().autoModelEnabled || false)
+// The model Model Auto actually picked for the most recent message, so the
+// sidebar stays in sync with what's really running instead of a stale manual pick.
+const autoModelActiveModel = ref('')
+
+function renameModel(modelName, nickname) {
+  const updated = setModelNickname(modelName, nickname)
+  modelNicknames.value = { ...(updated.modelNicknames || {}) }
 }
 
 // ===== Engine Switching =====
@@ -414,8 +481,8 @@ async function toggleEngine() {
 // ===== Settings =====
 async function openSettings() {
   showSettings.value = true
-  const settings = getSettings()
-  if (settings.storageDirName && await requestMemoryDirectoryPermission()) {
+  const chatHistoryRoot = await refreshChatHistoryStorage()
+  if (chatHistoryRoot) {
     await loadSelectedDirectoryState()
   }
 }
@@ -426,6 +493,7 @@ function closeSettings() {
 
 async function onSettingsSave(newSettings) {
   updateCurrentEngine()
+  autoModelEnabled.value = !!newSettings?.autoModelEnabled
   if (newSettings?.theme) {
     document.documentElement.setAttribute('data-theme', newSettings.theme)
   }
@@ -551,6 +619,9 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       :active-id="activeConversationId"
       :models="models"
       :selected-model="selectedModel"
+      :model-nicknames="modelNicknames"
+      :auto-model-enabled="autoModelEnabled"
+      :auto-model-active-model="autoModelActiveModel"
       :is-open="sidebarOpen"
       @new-chat="createNewChat"
       @select-chat="selectChat"
@@ -563,6 +634,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       @move-folder="moveFolder"
       @move-chat="moveChatToFolder"
       @select-model="selectModel"
+      @rename-model="renameModel"
       @open-settings="openSettings"
       @toggle-sidebar="toggleSidebar"
     />
@@ -584,6 +656,17 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
           <AlertCircle :size="15" />
           <span>{{ fallbackToast }}</span>
           <button class="toast-dismiss-btn" @click="fallbackToast = ''">
+            <X :size="12" />
+          </button>
+        </div>
+      </Transition>
+
+      <!-- Attach File Toast -->
+      <Transition name="slide-down">
+        <div v-if="attachToast" class="fallback-toast-alert glass">
+          <AlertCircle :size="15" />
+          <span>{{ attachToast }}</span>
+          <button class="toast-dismiss-btn" @click="attachToast = ''">
             <X :size="12" />
           </button>
         </div>
@@ -642,6 +725,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       v-if="showSettings"
       :conversations="conversations"
       :folders="folders"
+      :models="models"
       @close="closeSettings"
       @save="onSettingsSave"
       @folder-changed="onFolderChanged"

@@ -1,6 +1,6 @@
 <script setup>
-import { ref, nextTick, watch, onMounted } from 'vue'
-import { Send, Square } from 'lucide-vue-next'
+import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { Send, Square, Plus, Paperclip, FileText, X } from 'lucide-vue-next'
 
 const props = defineProps({
   disabled: {
@@ -17,6 +17,9 @@ const emit = defineEmits(['send', 'stop'])
 
 const input = ref('')
 const textareaRef = ref(null)
+const fileInputRef = ref(null)
+const showAddMenu = ref(false)
+const attachedFiles = ref([])
 
 function autoResize() {
   const el = textareaRef.value
@@ -30,7 +33,18 @@ function autoResize() {
 
 onMounted(() => {
   autoResize()
+  window.addEventListener('click', handleClickOutside)
 })
+
+onUnmounted(() => {
+  window.removeEventListener('click', handleClickOutside)
+})
+
+function handleClickOutside(e) {
+  if (!e.target.closest('.add-menu-wrapper')) {
+    showAddMenu.value = false
+  }
+}
 
 function handleKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -39,11 +53,38 @@ function handleKeydown(e) {
   }
 }
 
+function toggleAddMenu() {
+  showAddMenu.value = !showAddMenu.value
+}
+
+function openFilePicker() {
+  showAddMenu.value = false
+  fileInputRef.value?.click()
+}
+
+function handleFileSelect(e) {
+  const files = Array.from(e.target.files || [])
+  attachedFiles.value.push(...files)
+  e.target.value = ''
+}
+
+function removeAttachedFile(index) {
+  attachedFiles.value.splice(index, 1)
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 function sendMessage() {
   const text = input.value.trim()
-  if (!text || props.disabled) return
-  emit('send', text)
+  if ((!text && attachedFiles.value.length === 0) || props.disabled) return
+  emit('send', text, [...attachedFiles.value])
   input.value = ''
+  attachedFiles.value = []
   nextTick(autoResize)
 }
 
@@ -64,7 +105,50 @@ defineExpose({ focusInput })
 
 <template>
   <div class="chat-input-container">
+    <!-- Attached Files Preview -->
+    <div v-if="attachedFiles.length" class="attached-files-row">
+      <div v-for="(file, index) in attachedFiles" :key="`${file.name}-${index}`" class="attached-file-chip glass">
+        <FileText :size="13" class="attached-file-icon" />
+        <span class="attached-file-name" :title="file.name">{{ file.name }}</span>
+        <span class="attached-file-size">{{ formatFileSize(file.size) }}</span>
+        <button class="attached-file-remove" @click="removeAttachedFile(index)" title="Hapus lampiran">
+          <X :size="12" />
+        </button>
+      </div>
+    </div>
+
     <div class="chat-input-wrapper glass glow-accent">
+      <!-- "+" Add Menu (attach files, etc.) -->
+      <div class="add-menu-wrapper">
+        <button
+          class="add-btn"
+          @click="toggleAddMenu"
+          title="Tambah"
+          id="add-menu-btn"
+          type="button"
+        >
+          <Plus :size="18" />
+        </button>
+
+        <Transition name="fade">
+          <div v-if="showAddMenu" class="add-menu glass">
+            <button class="add-menu-option" @click="openFilePicker" type="button">
+              <Paperclip :size="14" />
+              <span>Pilih File</span>
+            </button>
+          </div>
+        </Transition>
+
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          class="file-hidden-input"
+          accept=".txt,.md,.markdown,.csv,.json,.log,.js,.ts,.jsx,.tsx,.py,.html,.css,.yml,.yaml,.xml"
+          @change="handleFileSelect"
+        />
+      </div>
+
       <textarea
         ref="textareaRef"
         v-model="input"
@@ -89,9 +173,9 @@ defineExpose({ focusInput })
         <button
           v-else
           @click="sendMessage"
-          :disabled="!input.trim() || disabled"
+          :disabled="(!input.trim() && attachedFiles.length === 0) || disabled"
           class="send-btn"
-          :class="{ 'send-btn--active': input.trim() && !disabled }"
+          :class="{ 'send-btn--active': (input.trim() || attachedFiles.length) && !disabled }"
           title="Send message (Enter)"
           id="send-btn"
         >
@@ -112,6 +196,122 @@ defineExpose({ focusInput })
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
+}
+
+/* Attached Files Preview Row */
+.attached-files-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.attached-file-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 5px 10px;
+  border-radius: 8px;
+  font-size: 0.74rem;
+  color: var(--color-text-secondary);
+  max-width: 220px;
+}
+
+.attached-file-icon {
+  color: var(--color-text-accent);
+  flex-shrink: 0;
+}
+
+.attached-file-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.attached-file-size {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.attached-file-remove {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.attached-file-remove:hover {
+  color: var(--color-danger);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+/* "+" Add Menu */
+.add-menu-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.add-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: none;
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  margin-bottom: 2px;
+}
+
+.add-btn:hover {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
+}
+
+.add-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  min-width: 160px;
+  border-radius: 10px;
+  padding: 5px;
+  z-index: 40;
+}
+
+.add-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  font-family: var(--font-sans);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.add-menu-option:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.file-hidden-input {
+  display: none;
 }
 
 .chat-input-wrapper {

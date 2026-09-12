@@ -11,7 +11,14 @@ export const DEFAULT_SETTINGS = {
   numCtxPc: 4096,     // PC (Server)
   temperature: 0.7,
   maxTokens: '',
-  storageDirName: '',
+  // Model Auto: when enabled, the model used per message is picked automatically
+  // based on the detected task category instead of the manually selected model.
+  autoModelEnabled: false,
+  autoModelMapLaptop: {},
+  autoModelMapPc: {},
+  // User-facing nicknames shown in the sidebar instead of the raw model id / GB size.
+  // Keyed by the real Ollama model name; never changes the underlying model itself.
+  modelNicknames: {},
   customTheme: {
     background: '#10131a',
     accent: '#22c55e',
@@ -40,6 +47,27 @@ export function saveSettingsToStorage(newSettings) {
   } catch (e) {
     return newSettings
   }
+}
+
+/**
+ * Rename (or clear) the sidebar label for a single model without touching
+ * anyone else's nickname. This never changes the underlying Ollama model id.
+ */
+export function setModelNickname(modelName, nickname) {
+  const current = getSettings()
+  const nicknames = { ...(current.modelNicknames || {}) }
+  const trimmed = (nickname || '').trim()
+  if (trimmed) {
+    nicknames[modelName] = trimmed
+  } else {
+    delete nicknames[modelName]
+  }
+  return saveSettingsToStorage({ modelNicknames: nicknames })
+}
+
+export function getModelDisplayName(modelName) {
+  const settings = getSettings()
+  return (settings.modelNicknames && settings.modelNicknames[modelName]) || modelName
 }
 
 export function applyCustomTheme(customTheme = DEFAULT_SETTINGS.customTheme) {
