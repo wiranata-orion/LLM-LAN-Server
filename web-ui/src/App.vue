@@ -13,7 +13,6 @@ import {
   loadStoredFolders,
   saveConversation,
   saveStoredFolders,
-  buildMemoryMessages,
   refreshChatHistoryStorage,
   getChatHistoryRootPath,
 } from './services/memory.js'
@@ -411,18 +410,15 @@ async function generateAssistantResponse() {
     generationElapsedSeconds.value = (Date.now() - generationStartedAt) / 1000
   }, 100)
 
-  const memoryMessages = latestUserMessage?.content
-    ? await buildMemoryMessages({
-        query: latestUserMessage.content,
-        model: modelForThisMessage,
-      })
-    : []
-
+  // Cross-conversation recall ("what's my name") is the agent-server's job
+  // (see memory-core.ts / orchestrator.ts) - it's tied to the memory root
+  // configured in Settings, not to this device's chat-history folder, so it
+  // keeps working no matter which chat-history folder is active.
   abortController = new AbortController()
   try {
     await sendAgentMessageStream(
       latestUserMessage?.content || '',
-      [...memoryMessages, ...history],
+      history,
       modelForThisMessage,
       abortController.signal,
       conv.id,

@@ -52,6 +52,7 @@ async function requestChat(
   stream: boolean,
   options?: ChatOptions,
   baseUrl: string = config.ollamaBaseUrl,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const canUseTools = tools.length > 0 && await supportsTools(model, baseUrl)
   const hasOptions = options && Object.values(options).some((value) => value !== undefined && value !== null && value !== '')
@@ -65,6 +66,7 @@ async function requestChat(
       ...(hasOptions ? { options } : {}),
       stream,
     }),
+    signal,
   })
 
   let response = await createRequest(canUseTools)
@@ -97,14 +99,22 @@ export async function chat(
   model = config.chatModel,
   options?: ChatOptions,
   baseUrl?: string,
+  signal?: AbortSignal,
 ): Promise<OllamaChatResponse> {
-  const response = await requestChat(messages, tools, model, false, options, baseUrl)
+  const response = await requestChat(messages, tools, model, false, options, baseUrl, signal)
   if (!response.ok) await parseError(response)
   const payload = await response.json() as OllamaChatResponse
   if (!payload.message) throw new OllamaError('Ollama returned no assistant message')
   return payload
 }
 
+/**
+ * @param signal Aborting this also cancels the underlying request to Ollama
+ * itself (not just this function's own bookkeeping), so the model actually
+ * stops generating - e.g. when routes.ts detects the client disconnected
+ * (the Stop button) - instead of continuing to burn GPU/CPU in the background
+ * for a response nobody is listening for anymore.
+ */
 export async function chatStream(
   messages: ChatMessage[],
   tools: ToolDefinition[],
@@ -112,8 +122,9 @@ export async function chatStream(
   onToken: (content: string) => void,
   options?: ChatOptions,
   baseUrl?: string,
+  signal?: AbortSignal,
 ): Promise<OllamaChatResponse> {
-  const response = await requestChat(messages, tools, model, true, options, baseUrl)
+  const response = await requestChat(messages, tools, model, true, options, baseUrl, signal)
   if (!response.ok) await parseError(response)
   if (!response.body) throw new OllamaError('Ollama returned no stream body')
 

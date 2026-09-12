@@ -76,6 +76,36 @@ function keywordScore(query: string, message: string): number {
   return matches / queryWords.size
 }
 
+// A question or request doesn't assert a fact - it's the answer that's worth
+// recalling. Without this, a question the user has repeated across several
+// chats (e.g. while testing something) tends to out-rank the one real answer,
+// since all those near-duplicate questions score highly against each other.
+// Casual Indonesian very often phrases a request imperatively with no "?" at
+// all ("sebutkan nama saya" / "katakan nama ku") - a plain trailing-"?" check
+// misses that entire class of message, so a request-verb-near-a-pronoun
+// pattern is checked too.
+const REQUEST_FOR_SELF_PATTERN = /\b(sebut(kan)?|katakan|beritahu|tunjukkan|ingatkan)\b[^.!?]{0,30}\b(saya|ku|mu|aku|kamu|anda)\b/i
+const TELL_ME_PATTERN = /\b(tell me|remind me|say)\b[^.!?]{0,30}\b(my|your)\b/i
+
+function isQuestion(message: string): boolean {
+  const trimmed = message.trim()
+  if (trimmed.endsWith('?')) return true
+  return REQUEST_FOR_SELF_PATTERN.test(trimmed) || TELL_ME_PATTERN.test(trimmed)
+}
+
+// Hedges, refusals, and unfilled template placeholders ("[Nama Anda]") carry
+// no real information. Left in the searchable pool they create a feedback
+// loop: once the model gives one of these non-answers, it gets stored and can
+// resurface as "relevant memory" for the next similar question, reinforcing
+// the same non-answer indefinitely instead of the actual fact.
+const LOW_SIGNAL_REPLY_PATTERN = /\b(tidak (dapat|bisa) (memberikan|membagikan|memberitahu)|tidak memiliki akses|privasi (pengguna|anda)|maaf,? saya tidak|i (cannot|can't|don't) (provide|share|know|have access)|as an ai( language model)?)\b/i
+const UNFILLED_PLACEHOLDER_PATTERN = /\[[^\[\]]{2,40}\]/
+
+function isLowSignalReply(sender: string, message: string): boolean {
+  if (sender !== 'assistant') return false
+  return LOW_SIGNAL_REPLY_PATTERN.test(message) || UNFILLED_PLACEHOLDER_PATTERN.test(message)
+}
+
 function toRecord(row: Record<string, unknown>): MemoryRecord {
   return {
     id: String(row.id),
@@ -254,6 +284,8 @@ export class SqliteMemoryCore implements MemoryCore {
     if (!query.trim()) return []
     const rows = (this.selectRecentForSearchStatement.all(config.memorySearchScanLimit) as Record<string, unknown>[])
       .filter((row) => !excludeId || String(row.id) !== excludeId)
+      .filter((row) => !isQuestion(String(row.message)))
+      .filter((row) => !isLowSignalReply(String(row.sender), String(row.message)))
 
     let queryEmbedding: number[] | null | undefined = precomputedEmbedding
     if (queryEmbedding === undefined) {

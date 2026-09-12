@@ -95,6 +95,17 @@ export function createRouter(context: AppContext): Router {
   })
 
   router.post('/chat', async (request, response) => {
+    // Cancels the actual upstream Ollama request the moment the client
+    // disconnects (e.g. the Stop button), instead of leaving Ollama to keep
+    // generating the whole reply in the background for a response nobody is
+    // reading anymore - see ollama.ts / orchestrator.ts for the rest of the
+    // signal plumbing. Declared before the try block so the catch clause can
+    // always reference it, even if request parsing itself fails.
+    const upstreamAbort = new AbortController()
+    response.on('close', () => {
+      if (!response.writableEnded) upstreamAbort.abort()
+    })
+
     try {
       const body = chatSchema.parse(request.body)
       const { orchestrator } = context.current
@@ -114,14 +125,17 @@ export function createRouter(context: AppContext): Router {
             (content) => response.write(`${JSON.stringify({ type: 'token', content })}\n`),
             body.options,
             body.ollamaBaseUrl,
+            upstreamAbort.signal,
           )
           response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)
           response.end()
           return
         } catch (error) {
+          // The client is already gone (that's what triggered the abort) - there
+          // is nothing left to write to, and trying would just throw again.
+          if (response.writableEnded || upstreamAbort.signal.aborted) return
           const message = error instanceof Error ? error.message : 'Agent request failed'
-          if (response.writableEnded) return
           response.write(`${JSON.stringify({ type: 'error', content: message })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)
           response.end()
@@ -135,6 +149,7 @@ export function createRouter(context: AppContext): Router {
         body.conversationId || 'default',
         body.options,
         body.ollamaBaseUrl,
+        upstreamAbort.signal,
       )
       response.json({
         ok: true,
@@ -144,6 +159,7 @@ export function createRouter(context: AppContext): Router {
         memoryId: result.memoryId,
       })
     } catch (error) {
+      if (response.writableEnded || upstreamAbort.signal.aborted) return
       response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Agent request failed' })
     }
   })
