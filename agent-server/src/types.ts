@@ -51,6 +51,12 @@ export interface OllamaChatResponse {
   done: boolean
 }
 
+export interface ChatOptions {
+  temperature?: number
+  num_ctx?: number
+  num_predict?: number
+}
+
 export interface AgentResponse {
   message: ChatMessage
   toolRounds: number

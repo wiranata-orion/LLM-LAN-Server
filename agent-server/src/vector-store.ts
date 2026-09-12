@@ -1,9 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import Database from 'better-sqlite3'
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import path from 'node:path'
-import { config } from './config.js'
 import type { VectorRecord } from './types.js'
 
-interface StoreFile {
+interface LegacyStoreFile {
   version: 1
   records: VectorRecord[]
 }
@@ -21,48 +21,165 @@ function cosineSimilarity(left: number[], right: number[]): number {
   return leftNorm && rightNorm ? dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm)) : 0
 }
 
-export class JsonVectorStore {
-  private records: VectorRecord[] = []
-  private loaded = false
+/**
+ * If `configuredPath` is the legacy `*.json` flat-file location, the actual
+ * SQLite file lives next to it as `*.sqlite`. A pre-existing JSON file at the
+ * legacy path (from before this store moved to SQLite) is migrated in once.
+ */
+function resolveSqlitePath(configuredPath: string): { sqlitePath: string; legacyJsonPath: string | null } {
+  if (configuredPath.toLowerCase().endsWith('.json')) {
+    return { sqlitePath: configuredPath.replace(/\.json$/i, '.sqlite'), legacyJsonPath: configuredPath }
+  }
+  return { sqlitePath: configuredPath, legacyJsonPath: null }
+}
 
-  private async load(): Promise<void> {
-    if (this.loaded) return
-    try {
-      const raw = await readFile(config.vectorStorePath, 'utf8')
-      const parsed = JSON.parse(raw) as StoreFile
-      this.records = Array.isArray(parsed.records) ? parsed.records : []
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'ENOENT') throw error
-      this.records = []
-    }
-    this.loaded = true
+type StoredRow = {
+  id: string
+  source: string
+  content: string
+  embedding: string
+  metadata: string
+  created_at: string
+}
+
+function rowToRecord(row: StoredRow): VectorRecord {
+  return {
+    id: row.id,
+    source: row.source,
+    content: row.content,
+    embedding: JSON.parse(row.embedding) as number[],
+    metadata: JSON.parse(row.metadata) as VectorRecord['metadata'],
+    createdAt: row.created_at,
+  }
+}
+
+/**
+ * Embeddings for both ingested RAG documents and conversation memory live
+ * here. Previously this was a single JSON file rewritten from scratch on
+ * every upsert, which meant every chat message re-serialized the entire
+ * store (it had grown to 11MB+ in real usage) - increasingly slow and hard
+ * on removable/flash storage. SQLite gives incremental, indexed writes
+ * instead, while an in-memory cache keeps search just as fast as before.
+ */
+export class VectorStore {
+  private readonly database: Database.Database
+  private readonly upsertStatement: Database.Statement
+  private readonly selectAllStatement: Database.Statement
+  private readonly countStatement: Database.Statement
+  private cache: VectorRecord[] | null = null
+
+  constructor(configuredPath: string) {
+    const { sqlitePath, legacyJsonPath } = resolveSqlitePath(configuredPath)
+    mkdirSync(path.dirname(sqlitePath), { recursive: true })
+    this.database = new Database(sqlitePath)
+    this.database.pragma('journal_mode = WAL')
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS vectors (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        content TEXT NOT NULL,
+        embedding TEXT NOT NULL,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_vectors_source ON vectors(source);
+    `)
+
+    this.upsertStatement = this.database.prepare(`
+      INSERT INTO vectors (id, source, content, embedding, metadata, created_at)
+      VALUES (@id, @source, @content, @embedding, @metadata, @createdAt)
+      ON CONFLICT(id) DO UPDATE SET
+        source = excluded.source,
+        content = excluded.content,
+        embedding = excluded.embedding,
+        metadata = excluded.metadata,
+        created_at = excluded.created_at
+    `)
+    this.selectAllStatement = this.database.prepare(
+      'SELECT id, source, content, embedding, metadata, created_at FROM vectors',
+    )
+    this.countStatement = this.database.prepare('SELECT COUNT(*) AS count FROM vectors')
+
+    this.migrateLegacyJsonIfPresent(legacyJsonPath)
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(path.dirname(config.vectorStorePath), { recursive: true })
-    const payload: StoreFile = { version: 1, records: this.records }
-    await writeFile(config.vectorStorePath, JSON.stringify(payload, null, 2), 'utf8')
+  private migrateLegacyJsonIfPresent(legacyJsonPath: string | null): void {
+    if (!legacyJsonPath || !existsSync(legacyJsonPath)) return
+    const alreadyMigrated = (this.countStatement.get() as { count: number }).count > 0
+    if (alreadyMigrated) return
+
+    try {
+      const raw = readFileSync(legacyJsonPath, 'utf8')
+      const parsed = JSON.parse(raw) as LegacyStoreFile
+      const records = Array.isArray(parsed.records) ? parsed.records : []
+      if (records.length) {
+        const transaction = this.database.transaction((items: VectorRecord[]) => {
+          for (const item of items) this.runUpsert(item)
+        })
+        transaction(records)
+        console.log(`Migrated ${records.length} legacy vector records from ${legacyJsonPath} into SQLite.`)
+      }
+      renameSync(legacyJsonPath, `${legacyJsonPath}.migrated`)
+    } catch (error) {
+      console.warn(`Legacy vector store migration from ${legacyJsonPath} failed:`, error)
+    }
+  }
+
+  private runUpsert(record: VectorRecord): void {
+    this.upsertStatement.run({
+      id: record.id,
+      source: record.source,
+      content: record.content,
+      embedding: JSON.stringify(record.embedding),
+      metadata: JSON.stringify(record.metadata ?? {}),
+      createdAt: record.createdAt,
+    })
+  }
+
+  private ensureCache(): VectorRecord[] {
+    if (!this.cache) {
+      this.cache = (this.selectAllStatement.all() as StoredRow[]).map(rowToRecord)
+    }
+    return this.cache
   }
 
   async upsert(records: VectorRecord[]): Promise<void> {
-    await this.load()
-    const incoming = new Map(records.map((record) => [record.id, record]))
-    this.records = [...this.records.filter((record) => !incoming.has(record.id)), ...records]
-    await this.persist()
+    if (!records.length) return
+    const transaction = this.database.transaction((items: VectorRecord[]) => {
+      for (const item of items) this.runUpsert(item)
+    })
+    transaction(records)
+
+    // Keep the in-memory cache in sync without a full reload from disk.
+    if (this.cache) {
+      const incoming = new Map(records.map((record) => [record.id, record]))
+      this.cache = [...this.cache.filter((record) => !incoming.has(record.id)), ...records]
+    }
   }
 
   async count(): Promise<number> {
-    await this.load()
-    return this.records.length
+    return (this.countStatement.get() as { count: number }).count
   }
 
-  async search(queryEmbedding: number[], limit: number, minScore: number): Promise<Array<VectorRecord & { score: number }>> {
-    await this.load()
-    return this.records
+  async search(
+    queryEmbedding: number[],
+    limit: number,
+    minScore: number,
+    filter?: (record: VectorRecord) => boolean,
+  ): Promise<Array<VectorRecord & { score: number }>> {
+    const records = this.ensureCache()
+    const pool = filter ? records.filter(filter) : records
+    return pool
       .map((record) => ({ ...record, score: cosineSimilarity(queryEmbedding, record.embedding) }))
       .filter((record) => record.score >= minScore)
       .sort((left, right) => right.score - left.score)
       .slice(0, limit)
   }
+
+  close(): void {
+    this.database.close()
+  }
 }
+
+/** Records whose id/source marks them as conversation memory, not an ingested document. */
+export const CONVERSATION_SOURCE_PREFIX = 'sqlite:conversations:'
