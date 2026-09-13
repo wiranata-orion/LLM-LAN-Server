@@ -907,10 +907,6 @@ onUnmounted(() => {
             <AlertCircle :size="11" />
             <span :title="wsStatus.error || ''">{{ wsStatus.error || 'Index bermasalah' }}</span>
           </template>
-          <template v-else>
-            <CheckCircle2 :size="11" />
-            <span>{{ wsStatus.chunkCount }} chunk · {{ wsFiles.length }} file</span>
-          </template>
         </div>
 
         <WorkspaceFileTree
