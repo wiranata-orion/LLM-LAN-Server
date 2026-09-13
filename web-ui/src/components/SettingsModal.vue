@@ -52,6 +52,14 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  // 'conversation' | 'workspace' - the chat-history storage folder (below) is
+  // a Conversation-mode feature (it stores chat history), so it's hidden
+  // while Workspace mode is active rather than shown for a feature that
+  // doesn't apply there.
+  appMode: {
+    type: String,
+    default: 'conversation',
+  },
 })
 
 const emit = defineEmits(['close', 'save', 'import-data', 'folder-changed'])
@@ -1198,8 +1206,9 @@ function resetDefaults() {
               <span class="section-title">Penyimpanan</span>
             </div>
 
-            <!-- Physical Folder Picker -->
-            <div class="storage-box glass">
+            <!-- Physical Folder Picker - stores conversation history, so it
+                 has nothing to do while Workspace mode is active. -->
+            <div v-if="appMode !== 'workspace'" class="storage-box glass">
               <div class="storage-box-header">
                 <div class="storage-icon-circle">
                   <Folder :size="18" />

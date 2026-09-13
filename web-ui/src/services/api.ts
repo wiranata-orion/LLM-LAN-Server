@@ -17,11 +17,22 @@ export interface AgentChatResult {
 }
 
 export interface AgentStreamEvent {
-  type: 'meta' | 'token' | 'done' | 'error'
+  type: 'meta' | 'token' | 'done' | 'error' | 'memory'
   content?: string
   toolRounds?: number
   retrievedChunks?: number
   memoryId?: string
+  // Present only when type === 'memory' - see MemoryEvent in agent-server/src/types.ts.
+  phase?: 'read' | 'write'
+  status?: 'start' | 'end' | 'error'
+  detail?: string
+}
+
+/** Live "reading memory" / "writing memory" activity for one chat turn - see MemoryIndicator.vue. */
+export interface MemoryActivityEvent {
+  phase: 'read' | 'write'
+  status: 'start' | 'end' | 'error'
+  detail?: string
 }
 
 const DEFAULT_AGENT_URL = 'http://127.0.0.1:8787/api'
@@ -128,6 +139,7 @@ export async function sendMessageStream(
   conversationId: string,
   onToken: (content: string) => void,
   onMeta?: (meta: { retrievedChunks?: number; memoryId?: string }) => void,
+  onMemory?: (event: MemoryActivityEvent) => void,
   isFallbackRetry = false,
 ): Promise<void> {
   const settings = getSettings()
@@ -136,7 +148,7 @@ export async function sendMessageStream(
     if (settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry && isConnectivityError(messageText)) {
       saveSettingsToStorage({ activeEngine: 'laptop' })
       dispatchEngineFallback('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
-      await sendMessageStream(message, history, model, signal, conversationId, onToken, onMeta, true)
+      await sendMessageStream(message, history, model, signal, conversationId, onToken, onMeta, onMemory, true)
       return true
     }
     return false
@@ -177,6 +189,9 @@ export async function sendMessageStream(
   const handleEvent = async (event: AgentStreamEvent): Promise<boolean> => {
     if (event.type === 'token' && event.content) onToken(event.content)
     if (event.type === 'meta') onMeta?.({ retrievedChunks: event.retrievedChunks, memoryId: event.memoryId })
+    if (event.type === 'memory' && event.phase && event.status) {
+      onMemory?.({ phase: event.phase, status: event.status, detail: event.detail })
+    }
     if (event.type === 'error') {
       const messageText = event.content || 'Agent request failed'
       if (await fallbackIfEligible(messageText)) return true

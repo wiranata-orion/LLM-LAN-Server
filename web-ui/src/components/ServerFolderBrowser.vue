@@ -1,12 +1,18 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { X, Folder, ChevronRight, Home, HardDrive, RefreshCw, AlertCircle, Check } from 'lucide-vue-next'
+import { X, Folder, ChevronRight, Home, HardDrive, RefreshCw, AlertCircle, Check, ClipboardPaste, CornerDownLeft } from 'lucide-vue-next'
 import { browseServerFolder } from '../services/api.ts'
 
 const props = defineProps({
   initialPath: {
     type: String,
     default: '',
+  },
+  // Overridable so the same picker can be reused for other folders
+  // (Vibe Coding's project folder), not just the memory location.
+  title: {
+    type: String,
+    default: 'Pilih Folder Penyimpanan Ingatan',
   },
 })
 
@@ -19,6 +25,12 @@ const shortcuts = ref([])
 const isLoading = ref(true)
 const errorMessage = ref('')
 
+// The address bar. Kept separate from `currentPath` so a half-typed path is
+// never mistaken for where the browser actually is: clicking through folders
+// overwrites it, but whatever is typed here only takes effect on submit.
+const pathInput = ref('')
+const pathInputRef = ref(null)
+
 async function loadPath(path) {
   isLoading.value = true
   errorMessage.value = ''
@@ -28,8 +40,11 @@ async function loadPath(path) {
     parentPath.value = result.parentPath
     directories.value = result.directories
     shortcuts.value = result.shortcuts
+    pathInput.value = result.currentPath || ''
+    return true
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : 'Gagal membuka folder.'
+    return false
   } finally {
     isLoading.value = false
   }
@@ -47,9 +62,44 @@ function openDirectory(entry) {
   loadPath(entry.path)
 }
 
-function confirmSelection() {
+/** Enter (or the arrow button) in the address bar: jump straight to that folder. */
+function submitPath() {
+  const typed = pathInput.value.trim()
+  if (!typed) {
+    goToRoots()
+    return
+  }
+  // The server does the real cleanup (quotes from "Copy as path", file://
+  // URLs, trailing separators) and answers with the folder it settled on.
+  loadPath(typed)
+}
+
+async function confirmSelection() {
+  const typed = pathInput.value.trim()
+
+  // Someone who pastes a path and clicks "Pilih Folder Ini" without pressing
+  // Enter first still means that path - so navigate there before selecting,
+  // which also validates it exists.
+  if (typed && typed !== currentPath.value) {
+    const ok = await loadPath(typed)
+    if (!ok) return
+  }
+
   if (!currentPath.value) return
   emit('select', currentPath.value)
+}
+
+async function pasteFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText()
+    if (!text?.trim()) return
+    pathInput.value = text.trim()
+    submitPath()
+  } catch {
+    // Clipboard permission denied (or an insecure origin) - the field can
+    // still be pasted into with Ctrl+V, so just focus it.
+    pathInputRef.value?.focus()
+  }
 }
 
 onMounted(() => {
@@ -61,7 +111,7 @@ onMounted(() => {
   <div class="folder-browser-backdrop" @click.self="$emit('close')">
     <div class="folder-browser glass" role="dialog" aria-modal="true" aria-labelledby="folder-browser-title">
       <div class="folder-browser-header">
-        <h3 id="folder-browser-title">Pilih Folder Penyimpanan Ingatan</h3>
+        <h3 id="folder-browser-title">{{ title }}</h3>
         <button class="close-btn" @click="$emit('close')" title="Tutup">
           <X :size="18" />
         </button>
@@ -85,12 +135,29 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- Current path / breadcrumb -->
+      <!-- Address bar: click through the list above, or just paste a path here -->
       <div class="folder-browser-path-row">
         <button class="path-up-btn" @click="goUp" :disabled="!parentPath" title="Naik satu level">
           <ChevronRight :size="14" class="path-up-icon" />
         </button>
-        <span class="path-current" :title="currentPath || ''">{{ currentPath || 'Pilih drive' }}</span>
+        <input
+          ref="pathInputRef"
+          v-model="pathInput"
+          class="path-input"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="Tempel path di sini, lalu Enter (mis. D:\projects\app)"
+          :title="pathInput || 'Ketik atau tempel path folder'"
+          @keydown.enter.prevent="submitPath"
+          @keydown.esc.stop="pathInput = currentPath || ''"
+        />
+        <button class="path-paste-btn" @click="pasteFromClipboard" title="Tempel dari clipboard lalu buka">
+          <ClipboardPaste :size="14" />
+        </button>
+        <button class="path-go-btn" @click="submitPath" title="Buka path ini (Enter)">
+          <CornerDownLeft :size="14" />
+        </button>
       </div>
 
       <!-- Directory listing -->
@@ -260,15 +327,48 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-.path-current {
+.path-input {
   flex: 1;
   min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  border: none;
+  background: transparent;
+  outline: none;
   font-size: 0.78rem;
   font-family: var(--font-mono, monospace);
   color: var(--color-text-primary);
+}
+
+.path-input::placeholder {
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
+}
+
+.folder-browser-path-row:focus-within {
+  border-color: var(--color-accent);
+}
+
+.path-paste-btn,
+.path-go-btn {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.path-paste-btn:hover,
+.path-go-btn:hover {
+  color: var(--color-text-accent);
+  border-color: var(--color-accent);
+  background: var(--color-bg-hover);
 }
 
 .folder-browser-list {

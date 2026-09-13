@@ -16,12 +16,33 @@ import {
   FolderPlus,
   FolderOpen,
   FolderInput,
+  FolderCog,
+  RefreshCw,
+  Loader2,
+  CheckCircle2,
   AlertCircle,
   EllipsisVertical,
   Wand2,
 } from 'lucide-vue-next'
 
 import FolderItem from './FolderItem.vue'
+import ModeSwitcher from './ModeSwitcher.vue'
+import WorkspaceFileTree from './WorkspaceFileTree.vue'
+import ServerFolderBrowser from './ServerFolderBrowser.vue'
+import {
+  status as wsStatus,
+  files as wsFiles,
+  treeVersion as wsTreeVersion,
+  openFile as wsOpenFile,
+  showFolderBrowser as wsShowFolderBrowser,
+  startStatusPolling,
+  stopStatusPolling,
+  initWorkspace,
+  openProjectFolder,
+  reindexProject,
+  openWorkspaceFile,
+  showToast as showWsToast,
+} from '../services/workspaceStore.js'
 
 const props = defineProps({
   conversations: {
@@ -62,6 +83,11 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  // 'conversation' | 'workspace' - drives the switcher above the model picker.
+  mode: {
+    type: String,
+    default: 'conversation',
+  },
 })
 
 const emit = defineEmits([
@@ -79,7 +105,70 @@ const emit = defineEmits([
   'rename-model',
   'open-settings',
   'toggle-sidebar',
+  'update:mode',
 ])
+
+// ===== Workspace mode: sidebar shows the open project's file tree instead of
+// the conversation folder/chat lists (see workspaceStore.js, shared with
+// WorkspaceView.vue so the tree here and the editor/chat panel there agree on
+// which file is open). =====
+const workspaceFolderName = computed(() => {
+  const root = wsStatus.value.workspaceRoot
+  if (!root) return ''
+  return root.split(/[\\/]/).filter(Boolean).pop() || root
+})
+
+async function handleOpenProjectFolder(path) {
+  const result = await openProjectFolder(path)
+  if (!result.ok) showWsToast(result.error, 'error')
+}
+
+function handleOpenWorkspaceFile(relPath) {
+  openWorkspaceFile(relPath)
+}
+
+// ===== Sidebar width: draggable on the right edge =====
+// One width serves both modes (conversation folder list and, in Workspace
+// mode, the project's file tree), persisted so a resize sticks across reloads.
+const SIDEBAR_MIN_WIDTH = 220
+const SIDEBAR_MAX_WIDTH = 520
+const DEFAULT_SIDEBAR_WIDTH = 280
+
+function readStoredSidebarWidth() {
+  try {
+    const stored = Number(localStorage.getItem('sidebar_width'))
+    if (Number.isFinite(stored) && stored >= SIDEBAR_MIN_WIDTH && stored <= SIDEBAR_MAX_WIDTH) return stored
+  } catch (e) {}
+  return DEFAULT_SIDEBAR_WIDTH
+}
+
+const sidebarWidth = ref(readStoredSidebarWidth())
+const isResizingSidebar = ref(false)
+let resizeStartX = 0
+let resizeStartWidth = 0
+
+function startSidebarResize(event) {
+  isResizingSidebar.value = true
+  resizeStartX = event.clientX
+  resizeStartWidth = sidebarWidth.value
+  window.addEventListener('mousemove', handleSidebarResize)
+  window.addEventListener('mouseup', stopSidebarResize)
+  event.preventDefault()
+}
+
+function handleSidebarResize(event) {
+  const next = resizeStartWidth + (event.clientX - resizeStartX)
+  sidebarWidth.value = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, next))
+}
+
+function stopSidebarResize() {
+  isResizingSidebar.value = false
+  window.removeEventListener('mousemove', handleSidebarResize)
+  window.removeEventListener('mouseup', stopSidebarResize)
+  try {
+    localStorage.setItem('sidebar_width', String(sidebarWidth.value))
+  } catch (e) {}
+}
 
 // ===== Model Dropdown =====
 const showModelDropdown = ref(false)
@@ -417,17 +506,31 @@ onMounted(() => {
 
   window.addEventListener('click', handleClickOutside)
   window.addEventListener('dragend', handleDragEnd)
+
+  // The sidebar is mounted for the app's whole lifetime (only its content
+  // swaps between modes), so this is where workspace status polling lives -
+  // it keeps tracking indexing progress in the background even while looking
+  // at an ordinary conversation.
+  initWorkspace()
+  startStatusPolling()
 })
 
 onUnmounted(() => {
   window.removeEventListener('click', handleClickOutside)
   window.removeEventListener('dragend', handleDragEnd)
+  window.removeEventListener('mousemove', handleSidebarResize)
+  window.removeEventListener('mouseup', stopSidebarResize)
+  stopStatusPolling()
   if (toastTimer) clearTimeout(toastTimer)
 })
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ 'sidebar--closed': !isOpen }">
+  <aside
+    class="sidebar"
+    :class="{ 'sidebar--closed': !isOpen }"
+    :style="{ width: sidebarWidth + 'px', marginLeft: isOpen ? '0px' : `-${sidebarWidth}px` }"
+  >
     <!-- Header -->
     <div class="sidebar-header">
       <div class="sidebar-brand">
@@ -437,6 +540,9 @@ onUnmounted(() => {
         <PanelLeftClose :size="18" />
       </button>
     </div>
+
+    <!-- Conversation / Workspace mode switch -->
+    <ModeSwitcher :mode="mode" @update:mode="$emit('update:mode', $event)" />
 
     <!-- Model Selector -->
     <div class="model-selector-wrapper">
@@ -509,6 +615,9 @@ onUnmounted(() => {
       </Transition>
     </div>
 
+    <!-- Conversation mode: chat/folder navigation. Workspace mode swaps this
+         whole area for the open project's file tree - see the v-else below. -->
+    <template v-if="mode === 'conversation'">
     <!-- Quick Actions: New Chat & Folder Side by Side (Below Model, Above Conversations) -->
     <div class="sidebar-actions-row">
       <button
@@ -754,6 +863,65 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+    </template>
+
+    <!-- Workspace mode: the open project's file tree, replacing the
+         conversation lists above. -->
+    <div v-else class="workspace-sidebar-section">
+      <div v-if="!wsStatus.isOpen" class="workspace-empty-prompt">
+        <FolderOpen :size="24" class="workspace-empty-icon" />
+        <p class="workspace-empty-title">Belum ada folder proyek</p>
+        <button class="quick-action-btn quick-action-btn--primary workspace-open-btn" @click="wsShowFolderBrowser = true">
+          <FolderOpen :size="14" />
+          <span>Pilih Folder Proyek</span>
+        </button>
+      </div>
+
+      <template v-else>
+        <div class="workspace-project-header">
+          <div class="workspace-project-name" :title="wsStatus.workspaceRoot">
+            <FolderOpen :size="13" />
+            <span>{{ workspaceFolderName }}</span>
+          </div>
+          <div class="workspace-project-actions">
+            <button
+              class="ws-icon-btn"
+              title="Index ulang"
+              :disabled="wsStatus.state === 'indexing'"
+              @click="reindexProject"
+            >
+              <RefreshCw :size="12" />
+            </button>
+            <button class="ws-icon-btn" title="Ganti folder proyek" @click="wsShowFolderBrowser = true">
+              <FolderCog :size="12" />
+            </button>
+          </div>
+        </div>
+
+        <div class="workspace-project-status">
+          <template v-if="wsStatus.state === 'indexing'">
+            <Loader2 :size="11" class="ws-spin" />
+            <span>Mengindeks {{ wsStatus.indexedFiles }}/{{ wsStatus.totalFiles }}</span>
+          </template>
+          <template v-else-if="wsStatus.state === 'error'">
+            <AlertCircle :size="11" />
+            <span :title="wsStatus.error || ''">{{ wsStatus.error || 'Index bermasalah' }}</span>
+          </template>
+          <template v-else>
+            <CheckCircle2 :size="11" />
+            <span>{{ wsStatus.chunkCount }} chunk · {{ wsFiles.length }} file</span>
+          </template>
+        </div>
+
+        <WorkspaceFileTree
+          class="workspace-tree-embedded"
+          embedded
+          :active-path="wsOpenFile?.relPath || ''"
+          :refresh-token="wsTreeVersion"
+          @open-file="handleOpenWorkspaceFile"
+        />
+      </template>
+    </div>
 
     <!-- Toast Alert for Folder Delete Rule -->
     <Transition name="fade">
@@ -773,13 +941,34 @@ onUnmounted(() => {
         <span>Settings</span>
       </button>
     </div>
+
+    <!-- Drag to resize (both modes share one width) -->
+    <div
+      class="sidebar-resize-handle"
+      :class="{ 'sidebar-resize-handle--active': isResizingSidebar }"
+      @mousedown="startSidebarResize"
+      title="Seret untuk mengubah lebar sidebar"
+    ></div>
   </aside>
+
+  <!-- Project folder picker for Workspace mode - single instance here since the
+       sidebar (unlike WorkspaceView) is always mounted, regardless of mode. -->
+  <ServerFolderBrowser
+    v-if="wsShowFolderBrowser"
+    title="Pilih Folder Proyek"
+    :initial-path="wsStatus.workspaceRoot || ''"
+    @select="handleOpenProjectFolder"
+    @close="wsShowFolderBrowser = false"
+  />
 </template>
 
 <style scoped>
 .sidebar {
+  position: relative;
+  /* Width/margin-left are set inline (see sidebarWidth in the script) so the
+     drag-to-resize handle below can control them; these are just the initial
+     values before that binding takes over. */
   width: 280px;
-  min-width: 280px;
   height: 100%;
   background: var(--color-bg-sidebar);
   border-right: 1px solid var(--color-border);
@@ -788,12 +977,32 @@ onUnmounted(() => {
   overflow: hidden;
   transition: margin-left 0.25s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.25s;
   will-change: margin-left;
+  flex-shrink: 0;
 }
 
 .sidebar--closed {
-  margin-left: -280px;
   visibility: hidden;
   pointer-events: none;
+}
+
+/* Drag-to-resize handle, shared by both modes. Sits just inside the right
+   edge (not a negative offset) because .sidebar clips overflow, which would
+   otherwise cut the handle's hit area in half. */
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 5;
+  background: transparent;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle--active {
+  background: var(--color-accent);
+  opacity: 0.5;
 }
 
 /* Header */
@@ -1059,6 +1268,132 @@ onUnmounted(() => {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 8px 0;
+}
+
+/* ===== Workspace mode: file tree section (replaces the conversation lists) ===== */
+.workspace-sidebar-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.workspace-empty-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 16px;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.workspace-empty-icon {
+  color: var(--color-text-accent);
+}
+
+.workspace-empty-title {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.workspace-open-btn {
+  width: auto;
+  padding: 8px 14px;
+}
+
+.workspace-project-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 4px;
+  flex-shrink: 0;
+}
+
+.workspace-project-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.workspace-project-name svg {
+  color: var(--color-text-accent);
+  flex-shrink: 0;
+}
+
+.workspace-project-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-project-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.ws-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.ws-icon-btn:hover:not(:disabled) {
+  color: var(--color-text-accent);
+  border-color: var(--color-accent);
+}
+
+.ws-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.workspace-project-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 12px 8px;
+  color: var(--color-text-muted);
+  font-size: 0.68rem;
+  flex-shrink: 0;
+}
+
+.workspace-project-status span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-spin {
+  animation: sidebar-ws-spin 1s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes sidebar-ws-spin {
+  to { transform: rotate(360deg); }
+}
+
+.workspace-tree-embedded {
+  flex: 1;
+  min-height: 0;
 }
 
 /* Quick Actions Row (Below Model, Above Conversations) */

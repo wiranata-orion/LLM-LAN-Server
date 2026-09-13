@@ -3,9 +3,11 @@ import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
+import MemoryIndicator from './components/MemoryIndicator.vue'
+import WorkspaceView from './components/WorkspaceView.vue'
 import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
 import { getModels, getSettings, saveSettingsToStorage, setModelNickname, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
-import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage } from './services/api.ts'
+import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage, checkAgentHealth } from './services/api.ts'
 import { resolveAutoModel } from './services/autoModel.js'
 import {
   loadStoredConversations,
@@ -25,7 +27,23 @@ const selectedModel = ref('')
 const isGenerating = ref(false)
 const currentEngine = ref('laptop')
 const isCurrentEngineOnline = ref(null)
+
+// Which half of the app is showing: ordinary chat, or the Vibe Coding
+// workspace. The top bar (memory + engine indicators) is shared by both, so
+// only the content below it swaps.
+const appMode = ref('conversation')
 const fallbackToast = ref('')
+
+// Ingatan (long-term memory / RAG on the agent-server): whether this
+// conversation is currently able to reach it, and what it's doing right now.
+// null = still checking on first load; true/false = last known reachability.
+// 'activity' flips to 'read'/'write' live while a chat turn is in flight -
+// see the onMemory callback passed to sendAgentMessageStream below, which is
+// fed by the ndjson 'memory' events the agent-server emits (orchestrator.ts).
+const memoryConnected = ref(null)
+const memoryActivity = ref('idle')
+const memoryErrorMessage = ref('')
+let memoryHealthTimer = null
 // Ticks while the active reply streams in, so the UI can show a live "Xs" timer;
 // frozen onto the message itself as `durationMs` once generation finishes.
 const generationElapsedSeconds = ref(0)
@@ -61,6 +79,26 @@ function handleEngineFallback(e) {
   }, 5000)
 }
 
+function setAppMode(nextMode) {
+  if (nextMode !== 'conversation' && nextMode !== 'workspace') return
+  appMode.value = nextMode
+  saveSettingsToStorage({ appMode: nextMode })
+}
+
+// Reachability of the agent-server that hosts "ingatan" (long-term memory /
+// RAG). Independent of the Ollama engine ping above - memory lives on the
+// agent-server regardless of which engine (Laptop/PC) is currently active.
+async function checkMemoryConnection() {
+  try {
+    await checkAgentHealth()
+    memoryConnected.value = true
+    memoryErrorMessage.value = ''
+  } catch (error) {
+    memoryConnected.value = false
+    memoryErrorMessage.value = error instanceof Error ? error.message : 'Agent server unreachable'
+  }
+}
+
 // ===== Lifecycle =====
 onMounted(async () => {
   // Load saved state
@@ -77,11 +115,19 @@ onMounted(async () => {
   }
   if (s.theme === 'custom') applyCustomTheme(s.customTheme)
   else clearCustomThemeContrast()
+  if (s.appMode === 'workspace' || s.appMode === 'conversation') appMode.value = s.appMode
   updateCurrentEngine()
   window.addEventListener('engine-fallback', handleEngineFallback)
 
   // Fetch real models
   await fetchModels()
+
+  // Ingatan connection indicator (top-right, next to the engine switch):
+  // check once now, then keep it honest with a periodic re-check so the
+  // badge reflects reality even if the agent-server is started/stopped
+  // while the app is already open.
+  checkMemoryConnection()
+  memoryHealthTimer = setInterval(checkMemoryConnection, 20000)
 
   // Chat history storage lives on the agent-server now (see Settings > Memory);
   // ask it whether a folder is configured before deciding to use it or fall
@@ -99,6 +145,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('engine-fallback', handleEngineFallback)
   if (generationTimerHandle) clearInterval(generationTimerHandle)
+  if (memoryHealthTimer) clearInterval(memoryHealthTimer)
 })
 
 // ===== API =====
@@ -428,12 +475,28 @@ async function generateAssistantResponse() {
       (meta) => {
         if (meta.memoryId) conv.messages[assistantIdx].memoryId = meta.memoryId
       },
+      (event) => {
+        // Any memory event at all means the agent-server (and its memory
+        // subsystem) just responded, so the connection badge can go green
+        // immediately instead of waiting for the next periodic health check.
+        memoryConnected.value = event.status !== 'error'
+        if (event.status === 'error') {
+          memoryErrorMessage.value = event.detail ? `${event.detail} gagal` : 'Operasi ingatan gagal'
+          memoryActivity.value = 'idle'
+        } else {
+          memoryActivity.value = event.status === 'start' ? event.phase : 'idle'
+        }
+      },
     )
   } catch (error) {
     if (!abortController.signal.aborted) {
       conv.messages[assistantIdx].content = `Error: ${error instanceof Error ? error.message : 'Agent request failed'}`
     }
   } finally {
+    // Whatever happened (finished cleanly, errored, or was stopped mid-way
+    // leaving a 'start' with no matching 'end'), the badge must not get stuck
+    // showing "Membaca..."/"Menulis..." once this turn is over.
+    memoryActivity.value = 'idle'
     clearInterval(generationTimerHandle)
     generationTimerHandle = null
     conv.messages[assistantIdx].durationMs = Date.now() - generationStartedAt
@@ -694,6 +757,8 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       @rename-model="renameModel"
       @open-settings="openSettings"
       @toggle-sidebar="toggleSidebar"
+      :mode="appMode"
+      @update:mode="setAppMode"
     />
 
     <!-- Mobile overlay when sidebar is open -->
@@ -743,8 +808,13 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
           </button>
         </div>
 
-        <!-- Engine Indicator Badge (PC Server vs Laptop) -->
+        <!-- Ingatan (memory) connection + activity indicator, and Engine Indicator Badge (PC Server vs Laptop) -->
         <div class="top-bar-right">
+          <MemoryIndicator
+            :connected="memoryConnected"
+            :activity="memoryActivity"
+            :error-message="memoryErrorMessage"
+          />
           <button
             class="engine-status-pill"
             :class="currentEngine === 'pc' ? 'engine-status-pill--pc' : 'engine-status-pill--laptop'"
@@ -766,8 +836,10 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
         </div>
       </header>
 
-      <!-- Chat View -->
+      <!-- Content: ordinary chat, or the Vibe Coding workspace. Both sit under
+           the same top bar above, so the memory + engine indicators stay put. -->
       <ChatView
+        v-if="appMode === 'conversation'"
         :messages="activeMessages"
         :is-generating="isGenerating"
         :model-name="selectedModel"
@@ -777,6 +849,8 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
         @regenerate="handleRegenerate"
         @rate-message="handleRateMessage"
       />
+
+      <WorkspaceView v-else :selected-model="selectedModel" />
     </main>
 
     <!-- Settings Modal -->
@@ -785,6 +859,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       :conversations="conversations"
       :folders="folders"
       :models="models"
+      :app-mode="appMode"
       @close="closeSettings"
       @save="onSettingsSave"
       @folder-changed="onFolderChanged"

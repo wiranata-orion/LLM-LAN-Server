@@ -1,6 +1,9 @@
 import axios from 'axios'
 
 export const DEFAULT_SETTINGS = {
+  // 'conversation' = ordinary chat, 'workspace' = Vibe Coding (file tree +
+  // editor + code-aware AI). Remembered so a reload lands back where you were.
+  appMode: 'conversation',
   activeEngine: 'laptop', // 'pc' | 'laptop'
   pcUrl: 'http://192.168.1.50:11434',
   laptopUrl: 'http://localhost:11434',
