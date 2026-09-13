@@ -229,3 +229,40 @@ export async function sendWorkspaceChat(
   }
   if (buffer.trim()) handleEvent(JSON.parse(buffer) as Record<string, unknown>)
 }
+
+// ===== AI Coding Assistant chat sessions (saved per project) =====
+
+export interface WorkspaceChatSummary {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  messageCount: number
+}
+
+export interface WorkspaceChatSession extends WorkspaceChatSummary {
+  messages: Array<Record<string, unknown>>
+}
+
+export async function listWorkspaceChats(): Promise<{ chats: WorkspaceChatSummary[] }> {
+  return requestJson('/chats')
+}
+
+export async function getWorkspaceChat(id: string): Promise<{ chat: WorkspaceChatSession }> {
+  return requestJson(`/chats/${encodeURIComponent(id)}`)
+}
+
+export async function saveWorkspaceChat(
+  id: string,
+  title: string,
+  messages: Array<Record<string, unknown>>,
+): Promise<{ chat: WorkspaceChatSummary }> {
+  return requestJson(`/chats/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ title, messages }),
+  })
+}
+
+export async function deleteWorkspaceChat(id: string): Promise<{ deleted: boolean }> {
+  return requestJson(`/chats/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}

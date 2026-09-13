@@ -28,8 +28,8 @@ import {
   startStatusPolling,
   stopStatusPolling,
   closeWorkspaceFile,
-  requestDiff,
-  applyProposedChange,
+  acceptCurrentProposal,
+  rejectCurrentProposal,
   sendChatPrompt,
   stopChatGeneration,
 } from '../services/workspaceStore.js'
@@ -164,8 +164,8 @@ onUnmounted(() => {
           :is-applying="applyingPath === (proposal?.filePath || '')"
           :is-loading="isFileLoading"
           :error-message="editorError"
-          @apply="applyProposedChange"
-          @discard-proposal="proposal = null"
+          @accept="acceptCurrentProposal"
+          @reject="rejectCurrentProposal"
           @close-file="closeWorkspaceFile"
         />
 
@@ -187,8 +187,6 @@ onUnmounted(() => {
             :error-message="chatError"
             @send="handleSend"
             @stop="stopChatGeneration"
-            @diff="requestDiff"
-            @apply="applyProposedChange"
             @collapse="collapseChat"
           />
         </template>

@@ -24,7 +24,18 @@ const props = defineProps({
   // there is no direct component reference across the sidebar/main-content
   // boundary, so this is how "please refresh" gets signaled instead.
   refreshToken: { type: Number, default: 0 },
+  // relPaths with an AI-proposed change nobody has accepted/rejected yet
+  // (see pendingFilePaths in workspaceStore.js) - shown as a small dot so the
+  // user can see which files would be touched before deciding.
+  pendingPaths: { type: [Set, Array], default: () => new Set() },
 })
+
+const pendingPathSet = computed(() => (props.pendingPaths instanceof Set ? props.pendingPaths : new Set(props.pendingPaths)))
+
+// Embedded mode sits inside the sidebar, whose project-name header above it
+// is indented 12px - matching that here keeps the search box and the tree's
+// own rows left-aligned with it instead of sitting 4px further in.
+const rowBaseIndent = computed(() => (props.embedded ? 12 : 8))
 
 const emit = defineEmits(['open-file'])
 
@@ -168,10 +179,12 @@ defineExpose({ refresh })
           'tree-row--active': row.relPath === activePath,
           'tree-row--dimmed': row.type === 'file' && !row.indexable,
         }"
-        :style="{ paddingLeft: `${8 + row.depth * 13}px` }"
-        :title="row.type === 'file' && !row.indexable
-          ? `${row.relPath} - tidak diindeks (format atau ukurannya di luar jangkauan)`
-          : row.relPath"
+        :style="{ paddingLeft: `${rowBaseIndent + row.depth * 13}px` }"
+        :title="row.type === 'file' && pendingPathSet.has(row.relPath)
+          ? `${row.relPath} - ada perubahan dari AI belum diterima/ditolak`
+          : (row.type === 'file' && !row.indexable
+            ? `${row.relPath} - tidak diindeks (format atau ukurannya di luar jangkauan)`
+            : row.relPath)"
         @click="handleRowClick(row)"
       >
         <template v-if="row.type === 'directory'">
@@ -182,8 +195,11 @@ defineExpose({ refresh })
         </template>
         <template v-else>
           <span class="tree-chevron"></span>
-          <FileCode v-if="row.indexable" :size="13" class="tree-icon tree-icon--code" />
-          <FileIcon v-else :size="13" class="tree-icon" />
+          <span class="tree-icon-wrap">
+            <FileCode v-if="row.indexable" :size="13" class="tree-icon tree-icon--code" />
+            <FileIcon v-else :size="13" class="tree-icon" />
+            <span v-if="row.type === 'file' && pendingPathSet.has(row.relPath)" class="tree-pending-dot"></span>
+          </span>
         </template>
 
         <span class="tree-name">{{ row.name }}</span>
@@ -222,6 +238,13 @@ defineExpose({ refresh })
   padding: 8px;
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
+}
+
+/* Lines the search box's left edge up with the 12px-indented project-name
+   header above it in the sidebar, instead of sitting 4px further in. */
+.file-tree--embedded .file-tree-toolbar {
+  padding-left: 12px;
+  padding-right: 12px;
 }
 
 .file-tree-search {
@@ -331,6 +354,24 @@ defineExpose({ refresh })
 
 .tree-icon--code {
   color: var(--color-success);
+}
+
+.tree-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/** A file with an AI-proposed change nobody has accepted/rejected yet. */
+.tree-pending-dot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 1.5px var(--color-bg-sidebar);
 }
 
 .tree-name {

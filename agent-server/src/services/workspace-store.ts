@@ -53,6 +53,41 @@ export interface WorkspaceChunkInput extends WorkspaceChunk {
   embedding: number[]
 }
 
+export interface WorkspaceChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  contextBlocks?: unknown[]
+  [key: string]: unknown
+}
+
+export interface WorkspaceChatSummary {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  messageCount: number
+}
+
+export interface WorkspaceChatSession extends WorkspaceChatSummary {
+  messages: WorkspaceChatMessage[]
+}
+
+interface ChatSummaryRow {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+  message_count: number
+}
+
+interface ChatRow {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+  messages: string
+}
+
 /** Cached per-workspace so search doesn't re-read and re-decode every row per query. */
 interface SearchCacheEntry {
   id: string
@@ -120,6 +155,10 @@ export class WorkspaceStore {
   private readonly selectChunksStatement: Database.Statement
   private readonly selectFilesStatement: Database.Statement
   private readonly countChunksStatement: Database.Statement
+  private readonly upsertChatStatement: Database.Statement
+  private readonly selectChatSummariesStatement: Database.Statement
+  private readonly selectChatStatement: Database.Statement
+  private readonly deleteChatStatement: Database.Statement
   /** Keyed by workspace root; dropped whenever that workspace's rows change. */
   private searchCache = new Map<string, SearchCacheEntry[]>()
 
@@ -155,6 +194,23 @@ export class WorkspaceStore {
 
       CREATE INDEX IF NOT EXISTS idx_workspace_chunks_root ON workspace_chunks(workspace_root);
       CREATE INDEX IF NOT EXISTS idx_workspace_chunks_file ON workspace_chunks(workspace_root, rel_path);
+
+      -- AI Coding Assistant chat sessions, scoped per project so reopening a
+      -- workspace brings back the same list of past conversations about it.
+      -- Deliberately separate from memory-core's conversation table: workspace
+      -- chats are never fed into cross-conversation "ingatan" recall (code
+      -- snippets go stale the moment the file changes), this is purely so the
+      -- user can save and revisit them, the same way Conversation mode does.
+      CREATE TABLE IF NOT EXISTS workspace_chats (
+        id TEXT PRIMARY KEY,
+        workspace_root TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        messages TEXT NOT NULL DEFAULT '[]'
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workspace_chats_root ON workspace_chats(workspace_root, updated_at DESC);
     `)
 
     this.upsertChunkStatement = this.database.prepare(`
@@ -199,6 +255,25 @@ export class WorkspaceStore {
     )
     this.countChunksStatement = this.database.prepare(
       'SELECT COUNT(*) AS count FROM workspace_chunks WHERE workspace_root = ?',
+    )
+
+    this.upsertChatStatement = this.database.prepare(`
+      INSERT INTO workspace_chats (id, workspace_root, title, created_at, updated_at, messages)
+      VALUES (@id, @workspaceRoot, @title, @createdAt, @updatedAt, @messages)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        updated_at = excluded.updated_at,
+        messages = excluded.messages
+    `)
+    this.selectChatSummariesStatement = this.database.prepare(
+      `SELECT id, title, created_at, updated_at, json_array_length(messages) AS message_count
+       FROM workspace_chats WHERE workspace_root = ? ORDER BY updated_at DESC`,
+    )
+    this.selectChatStatement = this.database.prepare(
+      'SELECT id, title, created_at, updated_at, messages FROM workspace_chats WHERE workspace_root = ? AND id = ?',
+    )
+    this.deleteChatStatement = this.database.prepare(
+      'DELETE FROM workspace_chats WHERE workspace_root = ? AND id = ?',
     )
   }
 
@@ -411,6 +486,61 @@ export class WorkspaceStore {
 
     const cutoff = scored[0].score * ratio
     return scored.filter((match) => match.score >= cutoff).slice(0, limit)
+  }
+
+  // ===== AI Coding Assistant chat sessions (per workspace_root) =====
+
+  listChats(workspaceRoot: string): WorkspaceChatSummary[] {
+    const rows = this.selectChatSummariesStatement.all(workspaceRoot) as ChatSummaryRow[]
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      messageCount: row.message_count,
+    }))
+  }
+
+  getChat(workspaceRoot: string, id: string): WorkspaceChatSession | null {
+    const row = this.selectChatStatement.get(workspaceRoot, id) as ChatRow | undefined
+    if (!row) return null
+    let messages: WorkspaceChatMessage[] = []
+    try {
+      messages = JSON.parse(row.messages) as WorkspaceChatMessage[]
+    } catch {
+      messages = []
+    }
+    return {
+      id: row.id,
+      title: row.title,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      messageCount: messages.length,
+      messages,
+    }
+  }
+
+  /** Upserts a chat session. Reuses `createdAt` when the session already exists. */
+  saveChat(
+    workspaceRoot: string,
+    input: { id: string; title: string; messages: WorkspaceChatMessage[] },
+  ): WorkspaceChatSummary {
+    const existing = this.selectChatStatement.get(workspaceRoot, input.id) as ChatRow | undefined
+    const now = new Date().toISOString()
+    const createdAt = existing?.created_at ?? now
+    this.upsertChatStatement.run({
+      id: input.id,
+      workspaceRoot,
+      title: input.title,
+      createdAt,
+      updatedAt: now,
+      messages: JSON.stringify(input.messages),
+    })
+    return { id: input.id, title: input.title, createdAt, updatedAt: now, messageCount: input.messages.length }
+  }
+
+  deleteChat(workspaceRoot: string, id: string): boolean {
+    return this.deleteChatStatement.run(workspaceRoot, id).changes > 0
   }
 
   close(): void {
