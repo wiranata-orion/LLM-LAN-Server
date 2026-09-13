@@ -4,7 +4,7 @@ import { Retriever } from './retriever.js'
 import { executeTool } from './tools/executor.js'
 // import { toolDefinitions } from './tools/registry.js'
 import type { MemoryCore } from './memory-core.js'
-import type { AgentResponse, ChatMessage, ChatOptions, ToolDefinition } from './types.js'
+import type { AgentResponse, ChatMessage, ChatOptions, MemoryEventListener, ToolDefinition } from './types.js'
 
 const toolDefinitions: ToolDefinition[] = []
 const agentInstruction = `You are Xufruz, a helpful, friendly local AI assistant running entirely on the user's own hardware via Ollama.
@@ -105,22 +105,49 @@ export class AgentOrchestrator {
   constructor(private readonly retriever: Retriever, private readonly memory: MemoryCore) {}
 
   /**
+   * Wraps a memory read/write with start/end/error events so a caller (see
+   * routes.ts) can relay live "reading memory" / "writing memory" activity to
+   * the UI instead of the memory subsystem being an invisible black box.
+   */
+  private async withMemoryEvent<T>(
+    onMemoryEvent: MemoryEventListener | undefined,
+    phase: 'read' | 'write',
+    detail: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    onMemoryEvent?.({ phase, status: 'start', detail })
+    try {
+      const result = await action()
+      onMemoryEvent?.({ phase, status: 'end', detail })
+      return result
+    } catch (error) {
+      onMemoryEvent?.({ phase, status: 'error', detail, error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+  }
+
+  /**
    * Appends the user's message to memory, retrieves relevant context/memory,
    * and assembles the final message list to send to Ollama.
    *
    * The query is embedded once and shared between document retrieval and
    * memory search instead of each doing its own redundant embedding call.
    */
-  private async prepareContext(input: ChatMessage[], conversationId: string, numCtx?: number): Promise<PreparedContext> {
+  private async prepareContext(
+    input: ChatMessage[],
+    conversationId: string,
+    numCtx?: number,
+    onMemoryEvent?: MemoryEventListener,
+  ): Promise<PreparedContext> {
     const latestUserMessage = [...input].reverse().find((message) => message.role === 'user')
 
     let justAppendedId: string | undefined
     if (latestUserMessage) {
-      const appended = await this.memory.appendMessage('user', latestUserMessage.content, { conversationId, provider: 'agent-server' })
+      const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-user', () =>
+        this.memory.appendMessage('user', latestUserMessage.content, { conversationId, provider: 'agent-server' }),
+      )
       justAppendedId = appended.id
     }
-
-    const snapshotPromise = this.memory.getLayerSnapshot(conversationId)
 
     let queryEmbedding: number[] | null = null
     if (latestUserMessage) {
@@ -131,15 +158,17 @@ export class AgentOrchestrator {
       }
     }
 
-    const [memoryResults, retrieved] = await Promise.all([
-      latestUserMessage
-        ? this.memory.search(latestUserMessage.content, queryEmbedding, justAppendedId)
-        : Promise.resolve([]),
-      latestUserMessage
-        ? this.retriever.search(latestUserMessage.content, queryEmbedding)
-        : Promise.resolve([]),
-    ])
-    const memoryState = await snapshotPromise
+    const [memoryResults, retrieved, memoryState] = await this.withMemoryEvent(onMemoryEvent, 'read', 'recall', () =>
+      Promise.all([
+        latestUserMessage
+          ? this.memory.search(latestUserMessage.content, queryEmbedding, justAppendedId)
+          : Promise.resolve([]),
+        latestUserMessage
+          ? this.retriever.search(latestUserMessage.content, queryEmbedding)
+          : Promise.resolve([]),
+        this.memory.getLayerSnapshot(conversationId),
+      ]),
+    )
 
     // Split the injection budget between documents and recalled memory, so
     // neither can grow big enough to squeeze the conversation out of the
@@ -200,8 +229,9 @@ export class AgentOrchestrator {
     options?: ChatOptions,
     ollamaBaseUrl?: string,
     signal?: AbortSignal,
+    onMemoryEvent?: MemoryEventListener,
   ): Promise<AgentResponse> {
-    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx)
+    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
@@ -209,7 +239,9 @@ export class AgentOrchestrator {
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
-        const appended = await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
+        const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-assistant', () =>
+          this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }),
+        )
         return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }
 
@@ -235,8 +267,9 @@ export class AgentOrchestrator {
     options?: ChatOptions,
     ollamaBaseUrl?: string,
     signal?: AbortSignal,
+    onMemoryEvent?: MemoryEventListener,
   ): Promise<AgentResponse> {
-    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx)
+    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
@@ -244,7 +277,9 @@ export class AgentOrchestrator {
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
-        const appended = await this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' })
+        const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-assistant', () =>
+          this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }),
+        )
         return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }
       for (const call of toolCalls) {

@@ -16,6 +16,7 @@ import {
 } from './config.js'
 import { browseDirectory } from './fs-browser.js'
 import { ping } from './ollama.js'
+import { createWorkspaceRouter } from './routes/workspace.js'
 import type { ChatMessage } from './types.js'
 
 const documentSchema = z.object({
@@ -74,6 +75,11 @@ const globalMemorySchema = z.object({
 
 export function createRouter(context: AppContext): Router {
   const router = Router()
+
+  // Vibe Coding workspace (file index, code RAG, apply-changes) - see
+  // routes/workspace.ts. Mounted as a sub-router because it owns its own
+  // project-scoped state rather than the shared memory/vector services.
+  router.use('/workspace', createWorkspaceRouter())
 
   router.get('/health', async (_request, response) => {
     try {
@@ -146,6 +152,13 @@ export function createRouter(context: AppContext): Router {
             body.options,
             body.ollamaBaseUrl,
             upstreamAbort.signal,
+            // Lets the client show a live "Membaca ingatan..." / "Menulis
+            // ingatan..." indicator instead of the memory subsystem being a
+            // silent black box - see MemoryIndicator.vue on the web-ui side.
+            (event) => {
+              if (response.writableEnded) return
+              response.write(`${JSON.stringify({ type: 'memory', phase: event.phase, status: event.status, detail: event.detail })}\n`)
+            },
           )
           response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)

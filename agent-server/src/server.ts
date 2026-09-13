@@ -3,6 +3,7 @@ import express from 'express'
 import { AppContext } from './app-context.js'
 import { config } from './config.js'
 import { createRouter } from './routes.js'
+import { getWorkspaceManager } from './services/workspace-indexer.js'
 
 const context = new AppContext()
 
@@ -29,4 +30,11 @@ app.listen(config.port, () => {
   console.log(`Agent server listening on http://127.0.0.1:${config.port}`)
   console.log(`Ollama endpoint: ${config.ollamaBaseUrl}`)
   console.log(`Memory storage: ${config.memoryRoot}`)
+
+  // Reopen (and re-watch) whichever project Vibe Coding had open last time, so
+  // the workspace is warm instead of asking for the folder again on every boot.
+  void getWorkspaceManager().restorePersisted().then(() => {
+    const status = getWorkspaceManager().getStatus()
+    if (status.workspaceRoot) console.log(`Workspace: ${status.workspaceRoot}`)
+  })
 })

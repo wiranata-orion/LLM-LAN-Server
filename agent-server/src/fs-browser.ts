@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -37,6 +37,44 @@ function isWindows(): boolean {
   return process.platform === 'win32'
 }
 
+/**
+ * Cleans up a hand-typed or pasted path before it is used.
+ *
+ * The clipboard rarely holds something `path.normalize` is happy with:
+ * Windows Explorer's "Copy as path" wraps the whole thing in double quotes,
+ * terminals and file managers add stray whitespace, and people paste paths
+ * with a trailing separator. A drive root ("C:\\") keeps its separator,
+ * because "C:" alone means "the current directory on C:", not the root.
+ */
+export function normalizeRequestedPath(rawPath: string): string {
+  let value = rawPath.trim()
+  // Surrounding single or double quotes, as added by "Copy as path".
+  if (value.length >= 2 && /^["']/.test(value) && value.endsWith(value[0])) {
+    value = value.slice(1, -1).trim()
+  }
+  // file:/// URLs, as produced by dragging from some file managers.
+  if (/^file:\/\//i.test(value)) {
+    try {
+      value = decodeURIComponent(value.replace(/^file:\/\/\/?/i, ''))
+      if (isWindows()) value = value.replace(/^\/+/, '')
+    } catch {
+      // Not a decodable URL - fall through and use it as typed.
+    }
+  }
+  if (!value) return value
+
+  // A bare drive letter is resolved before normalize() gets a chance to turn
+  // "C:" into "C:." - on Windows "C:" means "the current directory on drive
+  // C:", which is never what someone pasting a drive letter intends.
+  if (isWindows() && /^[A-Za-z]:[\\/]?$/.test(value)) {
+    return `${value.slice(0, 2)}\\`
+  }
+
+  const normalized = path.normalize(value)
+  // Drop a trailing separator so "D:\projects\" and "D:\projects" behave alike.
+  return normalized.length > 1 ? normalized.replace(/[\\/]+$/, '') : normalized
+}
+
 export function browseDirectory(requestedPath?: string): BrowseResult {
   const homeDir = os.homedir()
   const shortcuts: BrowseEntry[] = [{ name: 'Home', path: homeDir }]
@@ -48,14 +86,28 @@ export function browseDirectory(requestedPath?: string): BrowseResult {
     return { currentPath: '/', parentPath: null, directories: listSubdirectories('/'), shortcuts }
   }
 
-  const resolved = path.normalize(requestedPath.trim())
-  const directories = listSubdirectories(resolved)
-  const parent = path.dirname(resolved)
-  // On Windows, path.dirname("C:\\") is "C:\\" (can't go higher); treat that as "back to drive list".
-  const atDriveRoot = isWindows() && /^[A-Za-z]:\\?$/.test(resolved)
-  const parentPath = atDriveRoot ? null : (parent !== resolved ? parent : null)
+  const resolved = normalizeRequestedPath(requestedPath)
+  if (!existsSync(resolved)) {
+    throw new Error(`Folder tidak ditemukan: ${resolved}`)
+  }
 
-  return { currentPath: resolved, parentPath, directories, shortcuts }
+  // Pasting a *file* path lands in the folder that contains it. Windows
+  // Explorer's "Copy as path" on a file is a very common way to get a path
+  // onto the clipboard, and erroring out on it would be needlessly strict.
+  let target = resolved
+  try {
+    if (!statSync(resolved).isDirectory()) target = path.dirname(resolved)
+  } catch {
+    // Unreadable entry - let listSubdirectories below produce the real error.
+  }
+
+  const directories = listSubdirectories(target)
+  const parent = path.dirname(target)
+  // On Windows, path.dirname("C:\\") is "C:\\" (can't go higher); treat that as "back to drive list".
+  const atDriveRoot = isWindows() && /^[A-Za-z]:\\?$/.test(target)
+  const parentPath = atDriveRoot ? null : (parent !== target ? parent : null)
+
+  return { currentPath: target, parentPath, directories, shortcuts }
 }
 
 function listSubdirectories(directoryPath: string): BrowseEntry[] {
