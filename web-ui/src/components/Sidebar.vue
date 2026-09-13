@@ -34,6 +34,7 @@ import {
   files as wsFiles,
   treeVersion as wsTreeVersion,
   openFile as wsOpenFile,
+  pendingFilePaths as wsPendingFilePaths,
   showFolderBrowser as wsShowFolderBrowser,
   startStatusPolling,
   stopStatusPolling,
@@ -914,6 +915,7 @@ onUnmounted(() => {
           embedded
           :active-path="wsOpenFile?.relPath || ''"
           :refresh-token="wsTreeVersion"
+          :pending-paths="wsPendingFilePaths"
           @open-file="handleOpenWorkspaceFile"
         />
       </template>

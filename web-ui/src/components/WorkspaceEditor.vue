@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import hljs from 'highlight.js/lib/common'
 import {
   Check,
@@ -9,25 +9,29 @@ import {
   Loader2,
   AlertTriangle,
   Eye,
-  RotateCcw,
+
 } from 'lucide-vue-next'
 import { diffLines, collapseUnchanged } from '../services/diff.js'
 
 const props = defineProps({
   // { relPath, content, lines, truncated } or null when nothing is open.
   file: { type: Object, default: null },
-  // { filePath, newContent } - a change the model proposed, awaiting review.
+  // { filePath, newContent, streaming, messageIndex, segmentIndex } - a change
+  // the model proposed. `streaming` is true while it is still being written,
+  // which is exactly when this pane mirrors it live.
   proposal: { type: Object, default: null },
   isApplying: { type: Boolean, default: false },
   isLoading: { type: Boolean, default: false },
   errorMessage: { type: String, default: '' },
 })
 
-const emit = defineEmits(['apply', 'discard-proposal', 'close-file'])
+const emit = defineEmits(['accept', 'reject', 'close-file'])
 
 const showFullDiff = ref(false)
+const diffBodyRef = ref(null)
 
 const isDiffMode = computed(() => props.proposal !== null)
+const isStreamingProposal = computed(() => props.proposal?.streaming === true)
 
 const diffResult = computed(() => {
   if (!props.proposal) return null
@@ -77,10 +81,31 @@ function escapeHtml(value) {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function applyProposal() {
-  if (!props.proposal) return
-  emit('apply', props.proposal)
+// While the model streams a change in, follow the newest lines - unless the
+// user has scrolled up to read something earlier, in which case leave them be.
+const userScrolledAway = ref(false)
+
+function handleDiffScroll() {
+  const element = diffBodyRef.value
+  if (!element) return
+  userScrolledAway.value = element.scrollHeight - element.scrollTop - element.clientHeight > 32
 }
+
+watch(
+  () => props.proposal?.newContent,
+  () => {
+    if (!isStreamingProposal.value || userScrolledAway.value) return
+    nextTick(() => {
+      const element = diffBodyRef.value
+      if (element) element.scrollTop = element.scrollHeight
+    })
+  },
+)
+
+// A brand-new proposal starts at the top, following from there.
+watch(() => props.proposal?.filePath, () => {
+  userScrolledAway.value = false
+})
 </script>
 
 <template>
@@ -93,7 +118,11 @@ function applyProposal() {
         <span class="editor-path" :title="proposal?.filePath || file?.relPath || ''">
           {{ proposal?.filePath || file?.relPath || 'Tidak ada file terbuka' }}
         </span>
-        <span v-if="isDiffMode" class="editor-badge editor-badge--diff">Usulan perubahan</span>
+        <span v-if="isStreamingProposal" class="editor-badge editor-badge--live">
+          <Loader2 :size="10" class="spin" />
+          AI sedang menulis
+        </span>
+        <span v-else-if="isDiffMode" class="editor-badge editor-badge--diff">Usulan perubahan</span>
         <span v-else-if="file?.truncated" class="editor-badge editor-badge--warn">Dipotong</span>
       </div>
 
@@ -112,19 +141,28 @@ function applyProposal() {
             <Eye :size="13" />
             <span>{{ showFullDiff ? 'Ringkas' : 'Seluruh file' }}</span>
           </button>
-          <button class="editor-btn" title="Batalkan usulan ini" @click="emit('discard-proposal')">
-            <RotateCcw :size="13" />
-            <span>Batal</span>
+
+          <!-- The decision, right on the change itself -->
+          <span class="editor-decision-label">Terapkan perubahan ini?</span>
+          <button
+            class="editor-btn editor-btn--no"
+            title="Tidak - buang usulan ini, file tidak diubah"
+            @click="emit('reject')"
+          >
+            <X :size="13" />
+            <span>Tidak</span>
           </button>
           <button
-            class="editor-btn editor-btn--primary"
-            :disabled="isApplying"
-            title="Tulis perubahan ini ke file di disk"
-            @click="applyProposal"
+            class="editor-btn editor-btn--yes"
+            :disabled="isApplying || isStreamingProposal"
+            :title="isStreamingProposal
+              ? 'Tunggu sampai AI selesai menulis'
+              : 'Ya - tulis perubahan ini ke file di disk'"
+            @click="emit('accept')"
           >
             <Loader2 v-if="isApplying" :size="13" class="spin" />
             <Check v-else :size="13" />
-            <span>{{ isApplying ? 'Menerapkan...' : 'Apply Changes' }}</span>
+            <span>{{ isApplying ? 'Menerapkan...' : 'Ya' }}</span>
           </button>
         </template>
 
@@ -135,7 +173,7 @@ function applyProposal() {
     </header>
 
     <!-- Body -->
-    <div class="editor-body">
+    <div ref="diffBodyRef" class="editor-body" @scroll="handleDiffScroll">
       <div v-if="errorMessage" class="editor-message editor-message--error">
         <AlertTriangle :size="15" />
         <span>{{ errorMessage }}</span>
@@ -151,7 +189,12 @@ function applyProposal() {
         <p v-if="diffResult?.approximate" class="diff-note">
           File terlalu besar untuk dibandingkan baris per baris - bagian yang berubah ditampilkan sebagai blok pengganti.
         </p>
-        <p v-if="diffResult && diffResult.added === 0 && diffResult.removed === 0" class="diff-note">
+        <!-- Suppressed mid-stream: a half-written block legitimately has no
+             differences yet, and flashing this on every token is just noise. -->
+        <p
+          v-if="!isStreamingProposal && diffResult && diffResult.added === 0 && diffResult.removed === 0"
+          class="diff-note"
+        >
           Tidak ada perbedaan dengan isi file saat ini.
         </p>
         <table class="diff-table">
@@ -317,15 +360,52 @@ function applyProposal() {
   cursor: not-allowed;
 }
 
-.editor-btn--primary {
-  background: var(--color-accent-subtle);
-  border-color: var(--color-accent);
-  color: var(--color-text-accent);
+/* The decision pair, sitting on the change itself. */
+.editor-decision-label {
+  margin-left: 4px;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
 }
 
-.editor-btn--primary:hover:not(:disabled) {
-  background: var(--color-accent);
+.editor-btn--yes {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: var(--color-success);
+  font-weight: 700;
+}
+
+.editor-btn--yes:hover:not(:disabled) {
+  background: var(--color-success);
   color: #fff;
+}
+
+.editor-btn--no {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--color-danger);
+  font-weight: 700;
+}
+
+.editor-btn--no:hover:not(:disabled) {
+  background: var(--color-danger);
+  color: #fff;
+}
+
+/* Pulses while the model is still writing the change into this pane. */
+.editor-badge--live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.45);
+  color: var(--color-text-accent);
+  animation: editor-live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes editor-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
 
 .editor-body {

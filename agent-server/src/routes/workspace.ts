@@ -4,6 +4,7 @@ import { clearWorkspaceRoot, config, getWorkspaceRootInfo } from '../config.js'
 import { chatStream } from '../ollama.js'
 import { getWorkspaceManager } from '../services/workspace-indexer.js'
 import { buildWorkspaceContext } from '../services/workspace-rag.js'
+import type { WorkspaceChatMessage } from '../services/workspace-store.js'
 import type { ChatMessage } from '../types.js'
 
 const openSchema = z.object({
@@ -38,6 +39,14 @@ const workspaceChatSchema = z.object({
     role: z.enum(['system', 'user', 'assistant', 'tool']),
     content: z.string(),
   })).optional(),
+})
+
+const saveChatSessionSchema = z.object({
+  title: z.string(),
+  // Stored as-is (role + content + whatever extra fields the client tracks,
+  // e.g. contextBlocks) - this is a save slot for the UI's own message list,
+  // not something the server interprets.
+  messages: z.array(z.record(z.unknown())),
 })
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -147,6 +156,52 @@ export function createWorkspaceRouter(): Router {
       })
     } catch (error) {
       response.status(400).json({ ok: false, error: errorMessage(error, 'Gagal menulis file') })
+    }
+  })
+
+  // ===== AI Coding Assistant chat sessions (saved per project) =====
+
+  router.get('/chats', (_request, response) => {
+    try {
+      response.json({ ok: true, chats: manager.listChatSessions() })
+    } catch (error) {
+      response.status(400).json({ ok: false, error: errorMessage(error, 'Gagal membaca riwayat chat') })
+    }
+  })
+
+  router.get('/chats/:id', (request, response) => {
+    try {
+      const chat = manager.getChatSession(request.params.id)
+      if (!chat) {
+        response.status(404).json({ ok: false, error: 'Chat tidak ditemukan' })
+        return
+      }
+      response.json({ ok: true, chat })
+    } catch (error) {
+      response.status(400).json({ ok: false, error: errorMessage(error, 'Gagal membaca chat') })
+    }
+  })
+
+  router.put('/chats/:id', (request, response) => {
+    try {
+      const body = saveChatSessionSchema.parse(request.body)
+      const summary = manager.saveChatSession({
+        id: request.params.id,
+        title: body.title,
+        messages: body.messages as unknown as WorkspaceChatMessage[],
+      })
+      response.json({ ok: true, chat: summary })
+    } catch (error) {
+      response.status(400).json({ ok: false, error: errorMessage(error, 'Gagal menyimpan chat') })
+    }
+  })
+
+  router.delete('/chats/:id', (request, response) => {
+    try {
+      const deleted = manager.deleteChatSession(request.params.id)
+      response.json({ ok: true, deleted })
+    } catch (error) {
+      response.status(400).json({ ok: false, error: errorMessage(error, 'Gagal menghapus chat') })
     }
   })
 

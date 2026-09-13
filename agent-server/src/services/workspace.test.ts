@@ -344,3 +344,53 @@ test('WorkspaceStore keyword blending splits camelCase and paths', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// ===== Chat sessions =====
+
+test('WorkspaceStore saves, lists, reads and deletes chat sessions, scoped per project', () => {
+  const root = makeTempWorkspace()
+  const store = new WorkspaceStore(path.join(root, 'index.sqlite'))
+  try {
+    const projectA = 'C:/project-a'
+    const projectB = 'C:/project-b'
+
+    const saved = store.saveChat(projectA, {
+      id: 'chat-1',
+      title: 'Refactor auth',
+      messages: [{ role: 'user', content: 'kenapa login gagal?' }, { role: 'assistant', content: 'coba cek token' }],
+    })
+    assert.equal(saved.id, 'chat-1')
+    assert.equal(saved.messageCount, 2)
+    assert.ok(saved.createdAt)
+
+    // A chat saved under a different project must not show up here.
+    store.saveChat(projectB, { id: 'chat-2', title: 'Unrelated', messages: [{ role: 'user', content: 'x' }] })
+
+    const listA = store.listChats(projectA)
+    assert.equal(listA.length, 1)
+    assert.equal(listA[0].title, 'Refactor auth')
+    assert.equal(listA[0].messageCount, 2)
+
+    const fetched = store.getChat(projectA, 'chat-1')
+    assert.ok(fetched)
+    assert.deepEqual(fetched.messages, [
+      { role: 'user', content: 'kenapa login gagal?' },
+      { role: 'assistant', content: 'coba cek token' },
+    ])
+
+    // Re-saving keeps the original createdAt but bumps updatedAt.
+    const resaved = store.saveChat(projectA, { id: 'chat-1', title: 'Refactor auth (v2)', messages: [{ role: 'user', content: 'x' }] })
+    assert.equal(resaved.createdAt, saved.createdAt)
+    assert.equal(store.getChat(projectA, 'chat-1')?.title, 'Refactor auth (v2)')
+
+    assert.equal(store.deleteChat(projectA, 'chat-1'), true)
+    assert.equal(store.getChat(projectA, 'chat-1'), null)
+    assert.equal(store.deleteChat(projectA, 'does-not-exist'), false)
+
+    // The other project's chat must be untouched by all of this.
+    assert.equal(store.listChats(projectB).length, 1)
+  } finally {
+    store.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})

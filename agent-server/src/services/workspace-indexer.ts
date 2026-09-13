@@ -12,7 +12,13 @@ import {
 import { embed } from '../ollama.js'
 import { chunkCode, describeChunk } from './workspace-chunker.js'
 import { WorkspaceFilter, isIndexableExtension, looksBinary } from './workspace-ignore.js'
-import { WorkspaceStore, type WorkspaceChunkInput } from './workspace-store.js'
+import {
+  WorkspaceStore,
+  type WorkspaceChunkInput,
+  type WorkspaceChatMessage,
+  type WorkspaceChatSummary,
+  type WorkspaceChatSession,
+} from './workspace-store.js'
 import type {
   WorkspaceChunkMatch,
   WorkspaceStatus,
@@ -477,6 +483,28 @@ export class WorkspaceManager {
     const root = this.root
     if (!root || !this.store) return []
     return this.store.search(root, queryEmbedding, limit, minScore, excludeRelPaths, options)
+  }
+
+  // ===== AI Coding Assistant chat sessions =====
+
+  listChatSessions(): WorkspaceChatSummary[] {
+    const root = this.requireRoot()
+    return this.ensureStore().listChats(root)
+  }
+
+  getChatSession(id: string): WorkspaceChatSession | null {
+    const root = this.requireRoot()
+    return this.ensureStore().getChat(root, id)
+  }
+
+  saveChatSession(input: { id: string; title: string; messages: WorkspaceChatMessage[] }): WorkspaceChatSummary {
+    const root = this.requireRoot()
+    return this.ensureStore().saveChat(root, input)
+  }
+
+  deleteChatSession(id: string): boolean {
+    const root = this.requireRoot()
+    return this.ensureStore().deleteChat(root, id)
   }
 
   // ===== Filesystem access (all of it path-guarded) =====

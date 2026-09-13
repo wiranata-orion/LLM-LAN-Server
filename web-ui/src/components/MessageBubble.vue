@@ -69,11 +69,19 @@ const CODE_FENCE_TOKEN = 'XUFRUZCODEFENCEPLACEHOLDERx'
 // "$" inside code (e.g. `echo $HOME`, "$5"). Restored verbatim before
 // markdown-it runs, so its own fence parsing (see md.renderer.rules.fence)
 // still sees the real ``` syntax.
+//
+// A closing fence must use the same character and be at least as long as the
+// one that opened it - the same rule CommonMark itself uses. Without the
+// length check, a fence nested inside the content (e.g. the model shows the
+// contents of a markdown file that itself contains ``` example blocks) closed
+// the outer block at the first nested ``` it hit, and everything after that
+// point rendered with prose/code roles flipped for the rest of the message.
 function protectCodeFences(text) {
   const lines = text.split('\n')
   const fences = []
   const output = []
   let fenceMarker = null
+  let fenceLength = 0
   let current = []
 
   for (const line of lines) {
@@ -81,6 +89,7 @@ function protectCodeFences(text) {
       const open = line.match(/^ {0,3}(`{3,}|~{3,})/)
       if (open) {
         fenceMarker = open[1][0]
+        fenceLength = open[1].length
         current = [line]
         continue
       }
@@ -89,8 +98,9 @@ function protectCodeFences(text) {
     }
 
     current.push(line)
-    const closePattern = fenceMarker === '`' ? /^ {0,3}`{3,}\s*$/ : /^ {0,3}~{3,}\s*$/
-    if (closePattern.test(line)) {
+    const closePattern = fenceMarker === '`' ? /^ {0,3}(`{3,})\s*$/ : /^ {0,3}(~{3,})\s*$/
+    const closeMatch = line.match(closePattern)
+    if (closeMatch && closeMatch[1].length >= fenceLength) {
       fences.push(current.join('\n'))
       output.push(`${CODE_FENCE_TOKEN}${fences.length - 1}${CODE_FENCE_TOKEN}`)
       fenceMarker = null

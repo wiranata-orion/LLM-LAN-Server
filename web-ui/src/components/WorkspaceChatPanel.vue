@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick, watch, onMounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import MarkdownIt from 'markdown-it'
 import {
   Send,
@@ -12,8 +12,25 @@ import {
   AlertCircle,
   Sparkles,
   PanelRightClose,
+  History,
+  Plus,
+  Trash2,
 } from 'lucide-vue-next'
 import WorkspaceCodeBlock from './WorkspaceCodeBlock.vue'
+import { parseWorkspaceReplySegments, deriveFallbackFilePath } from '../services/workspaceChatParsing.js'
+import {
+  chatSessions,
+  activeChatId,
+  isChatHistoryLoading,
+  startNewChat,
+  selectChatSession,
+  deleteChatSessionById,
+  getChangeDecision,
+  clearChangeDecision,
+  acceptChange,
+  rejectChange,
+  requestDiff,
+} from '../services/workspaceStore.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -25,7 +42,7 @@ const props = defineProps({
   errorMessage: { type: String, default: '' },
 })
 
-const emit = defineEmits(['send', 'stop', 'diff', 'apply', 'collapse'])
+const emit = defineEmits(['send', 'stop', 'collapse'])
 
 const input = ref('')
 const textareaRef = ref(null)
@@ -41,121 +58,51 @@ function renderText(text) {
   return md.render(text)
 }
 
-/**
- * Splits an assistant reply into prose and code blocks.
- *
- * Line-based rather than one big regex because replies are parsed on every
- * token while streaming: a fence that hasn't closed yet must still render as
- * code (just not an applicable one) instead of leaking raw backticks.
- */
-function parseSegments(content) {
-  const lines = content.split('\n')
-  const segments = []
-  let inCode = false
-  let fenceCharacter = ''
-  let fenceInfo = ''
-  let buffer = []
+const parsedMessages = computed(() => props.messages.map((message, index) => {
+  const fallbackFilePath = deriveFallbackFilePath(message.contextBlocks)
+  const segments = message.role === 'assistant'
+    ? parseWorkspaceReplySegments(message.content || '', { fallbackFilePath })
+    : []
+  const isLast = index === props.messages.length - 1
+  const stillStreaming = isLast && props.isGenerating
 
-  const flushText = () => {
-    const text = buffer.join('\n')
-    if (text.trim()) segments.push({ kind: 'text', content: text })
-    buffer = []
+  // The model was shown a file the user explicitly named (@path), but the
+  // finished reply contains no labelled code block for it - it answered with
+  // explanation/advice instead of actually editing the file. Surfacing this
+  // is what the "Diff View"/"Terima"/"Tolak" buttons would otherwise leave
+  // silent: there's nothing to click, and no obvious reason why.
+  const hasExplicitFileContext = message.contextBlocks?.some((block) => block.reason === 'explicit') || false
+  const hasEditableCode = segments.some((segment) => segment.kind === 'code' && segment.filePath)
+  const showNoEditHint = message.role === 'assistant' && !stillStreaming
+    && hasExplicitFileContext && !hasEditableCode && Boolean(message.content)
+
+  return {
+    ...message,
+    key: `${index}-${message.role}`,
+    segments,
+    showNoEditHint,
   }
-
-  const flushCode = (closed) => {
-    const previousText = [...segments].reverse().find((segment) => segment.kind === 'text')
-    const { language, filePath } = resolveCodeTarget(fenceInfo, buffer, previousText?.content || '')
-    segments.push({ kind: 'code', language, filePath, content: buffer.join('\n'), closed })
-    buffer = []
-  }
-
-  for (const line of lines) {
-    if (!inCode) {
-      const open = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
-      if (open) {
-        flushText()
-        inCode = true
-        fenceCharacter = open[1][0]
-        fenceInfo = open[2] || ''
-        continue
-      }
-      buffer.push(line)
-      continue
-    }
-
-    const close = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/)
-    if (close && close[1][0] === fenceCharacter) {
-      flushCode(true)
-      inCode = false
-      continue
-    }
-    buffer.push(line)
-  }
-
-  if (inCode) flushCode(false)
-  else flushText()
-
-  return segments
-}
+}))
 
 /**
- * Works out which file a code block belongs to.
- *
- * The system prompt asks for "```ts:src/app.ts", but local models drift, so
- * three fallbacks follow - without a path the block can't be diffed or
- * applied, which is the whole point of the panel.
+ * Renders a user message with any @workspace / @path/to/file tokens as a
+ * highlighted tag instead of plain text, so a reference reads the same way
+ * here as it does in the "@" autocomplete that inserted it. HTML-escaped
+ * first since this goes through v-html.
  */
-function resolveCodeTarget(fenceInfo, codeLines, precedingText) {
-  const info = (fenceInfo || '').trim()
+const MENTION_TAG_PATTERN = /@([A-Za-z0-9_./\\-]+)/g
 
-  // 1. The documented form: ```lang:path/to/file.ts
-  if (info.includes(':')) {
-    const [language, ...rest] = info.split(':')
-    const filePath = rest.join(':').trim()
-    if (looksLikePath(filePath)) return { language: language.trim(), filePath: normalizePath(filePath) }
-  }
-
-  // 2. A bare path as the fence info: ```src/app.ts
-  if (looksLikePath(info) && !info.includes(' ')) {
-    return { language: extensionOf(info), filePath: normalizePath(info) }
-  }
-
-  // 3. A path in the first line of the code, as a comment.
-  const firstLine = (codeLines[0] || '').trim()
-  const commentPath = firstLine.match(/^(?:\/\/|#|--|<!--|\/\*)\s*([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+)\s*(?:-->|\*\/)?$/)
-  if (commentPath && looksLikePath(commentPath[1])) {
-    return { language: info || extensionOf(commentPath[1]), filePath: normalizePath(commentPath[1]) }
-  }
-
-  // 4. A path named just above the block ("update `src/app.ts`:" / "**src/app.ts**").
-  const tail = precedingText.split('\n').slice(-2).join(' ')
-  const mentioned = tail.match(/[`*"']([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+)[`*"']/)
-  if (mentioned && looksLikePath(mentioned[1])) {
-    return { language: info || extensionOf(mentioned[1]), filePath: normalizePath(mentioned[1]) }
-  }
-
-  return { language: info, filePath: '' }
+function renderUserMessage(text) {
+  const escaped = escapeHtml(text)
+  return escaped.replace(MENTION_TAG_PATTERN, (match, token) => {
+    if (token.toLowerCase() !== 'workspace' && !token.includes('.') && !token.includes('/')) return match
+    return `<span class="ws-mention-tag">@${token}</span>`
+  })
 }
 
-function looksLikePath(value) {
-  if (!value) return false
-  // Needs an extension; a bare word like "bash" is a language, not a file.
-  return /\.[A-Za-z0-9]+$/.test(value) && !/\s/.test(value)
+function escapeHtml(value) {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
-
-function normalizePath(value) {
-  return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
-}
-
-function extensionOf(value) {
-  return (value.split('.').pop() || '').toLowerCase()
-}
-
-const parsedMessages = computed(() => props.messages.map((message, index) => ({
-  ...message,
-  key: `${index}-${message.role}`,
-  segments: message.role === 'assistant' ? parseSegments(message.content || '') : [],
-})))
 
 // ===== "@" file autocomplete =====
 const mentionQuery = ref(null)
@@ -272,15 +219,25 @@ function autoResize() {
   element.style.height = `${Math.min(element.scrollHeight, 180)}px`
 }
 
-function insertWorkspaceToken() {
-  input.value = input.value ? `@workspace ${input.value}` : '@workspace '
-  nextTick(() => {
-    textareaRef.value?.focus()
-    autoResize()
-  })
+// Tracks whether the user has deliberately scrolled away from the bottom, so
+// a reply streaming in doesn't fight them - every token used to call
+// scrollToBottom() unconditionally, snapping back down the instant they tried
+// to scroll up to read an earlier message.
+const userScrolledAway = ref(false)
+const SCROLL_BOTTOM_THRESHOLD = 24
+
+function isNearBottom(element) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < SCROLL_BOTTOM_THRESHOLD
+}
+
+function handleMessagesScroll() {
+  const element = scrollerRef.value
+  if (!element) return
+  userScrolledAway.value = !isNearBottom(element)
 }
 
 function scrollToBottom() {
+  if (userScrolledAway.value) return
   nextTick(() => {
     const element = scrollerRef.value
     if (element) element.scrollTop = element.scrollHeight
@@ -288,8 +245,71 @@ function scrollToBottom() {
 }
 
 watch(() => props.messages.map((message) => message.content).join('|'), scrollToBottom)
+// A brand-new message (the user just sent one, or a reply just started) means
+// "jump back to the bottom" even if they were reading scrollback a moment ago.
+watch(() => props.messages.length, () => {
+  userScrolledAway.value = false
+  scrollToBottom()
+})
 watch(input, () => nextTick(autoResize))
 onMounted(autoResize)
+
+// ===== Accept / reject a proposed change - see workspaceStore.js =====
+function handleAccept(messageIndex, segmentIndex, { filePath, newContent }) {
+  acceptChange({ messageIndex, segmentIndex, filePath, newContent })
+}
+
+function handleReject(messageIndex, segmentIndex) {
+  rejectChange({ messageIndex, segmentIndex })
+}
+
+function handleUndo(messageIndex, segmentIndex) {
+  clearChangeDecision(messageIndex, segmentIndex)
+}
+
+// ===== Chat history dropdown =====
+const showHistoryMenu = ref(false)
+const historyWrapperRef = ref(null)
+
+function toggleHistoryMenu() {
+  showHistoryMenu.value = !showHistoryMenu.value
+}
+
+function handleNewChat() {
+  startNewChat()
+  showHistoryMenu.value = false
+}
+
+async function handleSelectChat(id) {
+  await selectChatSession(id)
+  showHistoryMenu.value = false
+}
+
+function handleDeleteChat(id) {
+  deleteChatSessionById(id)
+}
+
+function handleClickOutsideHistory(event) {
+  if (historyWrapperRef.value && !historyWrapperRef.value.contains(event.target)) {
+    showHistoryMenu.value = false
+  }
+}
+
+/** Compact "5 menit lalu" style relative time for the history list. */
+function formatRelativeTime(iso) {
+  const diffMs = Date.now() - new Date(iso).getTime()
+  const minutes = Math.floor(diffMs / 60000)
+  if (minutes < 1) return 'baru saja'
+  if (minutes < 60) return `${minutes} menit lalu`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} jam lalu`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} hari lalu`
+  return new Date(iso).toLocaleDateString('id-ID')
+}
+
+onMounted(() => window.addEventListener('click', handleClickOutsideHistory))
+onUnmounted(() => window.removeEventListener('click', handleClickOutsideHistory))
 
 function reasonLabel(reason) {
   if (reason === 'explicit') return 'disebut langsung'
@@ -310,9 +330,44 @@ function reasonLabel(reason) {
         <Crosshair :size="11" />
         {{ activeFilePath.split('/').pop() }}
       </span>
+
+      <div ref="historyWrapperRef" class="ws-history-wrapper">
+        <button class="ws-chat-history-btn" title="Riwayat chat" @click="toggleHistoryMenu">
+          <History :size="15" />
+        </button>
+        <Transition name="fade">
+          <div v-if="showHistoryMenu" class="ws-history-menu glass">
+            <button class="ws-history-new-btn" @click="handleNewChat">
+              <Plus :size="13" />
+              <span>Chat Baru</span>
+            </button>
+            <div class="ws-history-list">
+              <p v-if="isChatHistoryLoading" class="ws-history-empty">Memuat...</p>
+              <p v-else-if="!chatSessions.length" class="ws-history-empty">Belum ada riwayat chat tersimpan.</p>
+              <div
+                v-for="session in chatSessions"
+                :key="session.id"
+                class="ws-history-item"
+                :class="{ 'ws-history-item--active': session.id === activeChatId }"
+                role="button"
+                tabindex="0"
+                @click="handleSelectChat(session.id)"
+              >
+                <div class="ws-history-item-main">
+                  <span class="ws-history-item-title" :title="session.title">{{ session.title || 'Chat baru' }}</span>
+                  <span class="ws-history-item-meta">{{ formatRelativeTime(session.updatedAt) }} · {{ session.messageCount }} pesan</span>
+                </div>
+                <button class="ws-history-delete-btn" title="Hapus chat ini" @click.stop="handleDeleteChat(session.id)">
+                  <Trash2 :size="12" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </Transition>
+      </div>
     </header>
 
-    <div ref="scrollerRef" class="ws-chat-messages">
+    <div ref="scrollerRef" class="ws-chat-messages" @scroll="handleMessagesScroll">
       <div v-if="!messages.length" class="ws-chat-empty">
         <Bot :size="26" />
         <p class="ws-chat-empty-title">Tanya apa saja tentang proyek ini</p>
@@ -324,7 +379,7 @@ function reasonLabel(reason) {
       </div>
 
       <article
-        v-for="message in parsedMessages"
+        v-for="(message, messageIndex) in parsedMessages"
         :key="message.key"
         class="ws-message"
         :class="`ws-message--${message.role}`"
@@ -351,7 +406,8 @@ function reasonLabel(reason) {
             </span>
           </div>
 
-          <div v-if="message.role === 'user'" class="ws-user-text">{{ message.content }}</div>
+          <!-- eslint-disable-next-line vue/no-v-html -- HTML-escaped first; only wraps @mentions in a tag span -->
+          <div v-if="message.role === 'user'" class="ws-user-text" v-html="renderUserMessage(message.content)"></div>
 
           <template v-else>
             <p v-if="!message.content && isGenerating" class="ws-thinking">
@@ -368,10 +424,21 @@ function reasonLabel(reason) {
                 :file-path="segment.filePath"
                 :is-streaming="!segment.closed"
                 :is-applying="applyingPath === segment.filePath"
-                @diff="emit('diff', $event)"
-                @apply="emit('apply', $event)"
+                :decision="getChangeDecision(messageIndex, index)"
+                @diff="requestDiff({ ...$event, messageIndex, segmentIndex: index })"
+                @accept="handleAccept(messageIndex, index, $event)"
+                @reject="handleReject(messageIndex, index)"
+                @undo="handleUndo(messageIndex, index)"
               />
             </template>
+
+            <div v-if="message.showNoEditHint" class="ws-no-edit-hint">
+              <AlertCircle :size="13" />
+              <span>
+                AI menjawab dengan penjelasan, bukan perubahan file. Coba lebih tegas, misalnya:
+                <em>"Tulis ulang seluruh isi file ini agar ..."</em> atau <em>"Ganti fungsi X menjadi ..."</em>.
+              </span>
+            </div>
           </template>
         </div>
       </article>
@@ -399,16 +466,7 @@ function reasonLabel(reason) {
         </button>
       </div>
 
-      <div class="ws-composer-row">
-        <button
-          class="ws-composer-btn"
-          title="Cari di seluruh workspace"
-          type="button"
-          @click="insertWorkspaceToken"
-        >
-          <Search :size="15" />
-        </button>
-
+      <div class="ws-composer-box">
         <textarea
           ref="textareaRef"
           v-model="input"
@@ -420,24 +478,28 @@ function reasonLabel(reason) {
           @click="updateMentionState"
         ></textarea>
 
-        <button
-          v-if="isGenerating"
-          class="ws-send-btn ws-send-btn--stop"
-          title="Hentikan"
-          @click="emit('stop')"
-        >
-          <Square :size="15" fill="currentColor" />
-        </button>
-        <button
-          v-else
-          class="ws-send-btn"
-          :class="{ 'ws-send-btn--active': input.trim() }"
-          :disabled="!input.trim()"
-          title="Kirim (Enter)"
-          @click="send"
-        >
-          <Send :size="15" />
-        </button>
+        <div class="ws-composer-divider"></div>
+
+        <div class="ws-composer-toolbar">
+          <button
+            v-if="isGenerating"
+            class="ws-send-btn ws-send-btn--stop"
+            title="Hentikan"
+            @click="emit('stop')"
+          >
+            <Square :size="15" fill="currentColor" />
+          </button>
+          <button
+            v-else
+            class="ws-send-btn"
+            :class="{ 'ws-send-btn--active': input.trim() }"
+            :disabled="!input.trim()"
+            title="Kirim (Enter)"
+            @click="send"
+          >
+            <Send :size="15" />
+          </button>
+        </div>
       </div>
 
       <p class="ws-composer-hint">
@@ -511,6 +573,136 @@ function reasonLabel(reason) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ===== Chat history dropdown ===== */
+.ws-history-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.ws-chat-history-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.ws-chat-history-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
+.ws-history-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 260px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: 10px;
+  background: var(--color-bg-tertiary);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+  z-index: 30;
+  overflow: hidden;
+}
+
+.ws-history-new-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border: none;
+  border-bottom: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-accent);
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ws-history-new-btn:hover {
+  background: var(--color-accent-subtle);
+}
+
+.ws-history-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.ws-history-empty {
+  margin: 0;
+  padding: 16px 12px;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+.ws-history-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.ws-history-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.ws-history-item--active {
+  background: var(--color-accent-subtle);
+}
+
+.ws-history-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ws-history-item-title {
+  color: var(--color-text-primary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-history-item-meta {
+  color: var(--color-text-muted);
+  font-size: 0.65rem;
+}
+
+.ws-history-delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ws-history-delete-btn:hover {
+  color: var(--color-danger);
+  background: rgba(239, 68, 68, 0.12);
 }
 
 .ws-chat-messages {
@@ -597,6 +789,17 @@ function reasonLabel(reason) {
   word-break: break-word;
 }
 
+.ws-user-text :deep(.ws-mention-tag) {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
 .ws-context-chips {
   display: flex;
   flex-wrap: wrap;
@@ -674,6 +877,31 @@ function reasonLabel(reason) {
 .ws-prose :deep(a) { color: var(--color-text-accent); }
 .ws-prose :deep(strong) { color: var(--color-text-primary); font-weight: 700; }
 
+.ws-no-edit-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+  font-size: 0.73rem;
+  line-height: 1.55;
+}
+
+.ws-no-edit-hint svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.ws-no-edit-hint em {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
 .ws-chat-error {
   display: flex;
   align-items: center;
@@ -743,44 +971,32 @@ function reasonLabel(reason) {
   white-space: nowrap;
 }
 
-.ws-composer-row {
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  padding: 5px;
+/* Stacked layout: textarea on top, a divider line, then the send button
+   below it on its own row - instead of the button sitting beside the input. */
+.ws-composer-box {
   border: 1px solid var(--color-border);
   border-radius: 11px;
   background: var(--color-bg-input);
+  overflow: hidden;
 }
 
-/* Matches .ws-send-btn's idle appearance (same padding/background/radius) so
-   the two ends of the composer row read as a matched pair instead of one
-   looking like a plain icon and the other a proper button. */
-.ws-composer-btn {
+.ws-composer-divider {
+  height: 1px;
+  background: var(--color-border);
+}
+
+.ws-composer-toolbar {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 8px;
-  border: none;
-  border-radius: 8px;
-  background: var(--color-bg-tertiary);
-  color: var(--color-text-muted);
-  cursor: pointer;
-  transition: all 0.16s ease;
-  flex-shrink: 0;
-}
-
-.ws-composer-btn:hover {
-  color: var(--color-text-accent);
-  background: var(--color-bg-hover);
+  justify-content: flex-end;
+  padding: 6px;
 }
 
 .ws-textarea {
-  flex: 1;
+  width: 100%;
   min-width: 0;
   min-height: 38px;
   max-height: 180px;
-  padding: 9px 2px;
+  padding: 9px 10px;
   border: none;
   background: transparent;
   color: var(--color-text-primary);

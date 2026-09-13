@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import hljs from 'highlight.js/lib/common'
-import { Check, Copy, GitCompare, FileCode, Loader2 } from 'lucide-vue-next'
+import { Check, Copy, GitCompare, FileCode, Loader2, X, Undo2, ChevronRight, ChevronDown } from 'lucide-vue-next'
 
 const props = defineProps({
   code: { type: String, required: true },
@@ -11,11 +11,21 @@ const props = defineProps({
   isApplying: { type: Boolean, default: false },
   /** Still streaming - the block may be half-written, so writing it would be unsafe. */
   isStreaming: { type: Boolean, default: false },
+  /** null = undecided (pending), 'accepted' | 'rejected' once the user has chosen. */
+  decision: { type: String, default: null },
 })
 
-const emit = defineEmits(['diff', 'apply'])
+const emit = defineEmits(['diff', 'accept', 'reject', 'undo'])
 
 const copied = ref(false)
+
+// A block tied to a real file is a *proposed change*, not something to read
+// here: its content is mirrored into the editor pane as a live diff, so the
+// chat column shows a compact card instead of dumping the whole file into a
+// narrow sidebar. Untargeted snippets (examples, shell commands) still render
+// inline, since there is nowhere else for them to go.
+const isFileChange = computed(() => Boolean(props.filePath))
+const isExpanded = ref(false)
 
 // Only a block the model tied to a real file can be diffed or written.
 const isActionable = computed(() => Boolean(props.filePath) && !props.isStreaming)
@@ -66,13 +76,26 @@ async function copyCode() {
 </script>
 
 <template>
-  <div class="ws-code-card" :class="{ 'ws-code-card--targeted': isActionable }">
+  <div
+    class="ws-code-card"
+    :class="{
+      'ws-code-card--targeted': isActionable && !decision,
+      'ws-code-card--accepted': decision === 'accepted',
+      'ws-code-card--rejected': decision === 'rejected',
+    }"
+  >
     <div class="ws-code-header">
       <div class="ws-code-meta">
         <FileCode v-if="filePath" :size="12" class="ws-code-file-icon" />
         <span v-if="filePath" class="ws-code-path" :title="filePath">{{ filePath }}</span>
         <span v-else class="ws-code-lang">{{ language || 'code' }}</span>
         <span class="ws-code-lines">{{ lineCount }} baris</span>
+        <span v-if="decision === 'accepted'" class="ws-code-decision-badge ws-code-decision-badge--accepted">
+          <Check :size="11" /> Diterima
+        </span>
+        <span v-else-if="decision === 'rejected'" class="ws-code-decision-badge ws-code-decision-badge--rejected">
+          <X :size="11" /> Ditolak
+        </span>
       </div>
 
       <div class="ws-code-actions">
@@ -82,31 +105,64 @@ async function copyCode() {
           <span>{{ copied ? 'Tersalin' : 'Copy' }}</span>
         </button>
 
-        <button
-          v-if="isActionable"
-          class="ws-code-btn"
-          title="Bandingkan dengan isi file saat ini"
-          @click="emit('diff', { filePath, newContent: code })"
-        >
-          <GitCompare :size="12" />
-          <span>Diff View</span>
-        </button>
+        <!-- Undecided: Accept / Reject this proposed change -->
+        <template v-if="isActionable && !decision">
+          <button
+            class="ws-code-btn"
+            title="Tampilkan perbandingan di editor"
+            @click="emit('diff', { filePath, newContent: code })"
+          >
+            <GitCompare :size="12" />
+            <span>Lihat di Editor</span>
+          </button>
+          <button
+            class="ws-code-btn ws-code-btn--reject"
+            title="Tidak - tidak ada yang ditulis ke disk"
+            @click="emit('reject')"
+          >
+            <X :size="12" />
+            <span>Tidak</span>
+          </button>
+          <button
+            class="ws-code-btn ws-code-btn--accept"
+            :disabled="isApplying"
+            title="Ya - tulis isi blok ini ke file di disk"
+            @click="emit('accept', { filePath, newContent: code })"
+          >
+            <Loader2 v-if="isApplying" :size="12" class="spin" />
+            <Check v-else :size="12" />
+            <span>{{ isApplying ? 'Menerapkan...' : 'Ya' }}</span>
+          </button>
+        </template>
 
+        <!-- Rejected earlier: let the user change their mind without retyping the prompt -->
         <button
-          v-if="isActionable"
-          class="ws-code-btn ws-code-btn--apply"
-          :disabled="isApplying"
-          title="Tulis isi blok ini ke file di disk"
-          @click="emit('apply', { filePath, newContent: code })"
+          v-else-if="isActionable && decision === 'rejected'"
+          class="ws-code-btn"
+          title="Batalkan penolakan, tinjau ulang perubahan ini"
+          @click="emit('undo')"
         >
-          <Loader2 v-if="isApplying" :size="12" class="spin" />
-          <Check v-else :size="12" />
-          <span>{{ isApplying ? 'Menerapkan...' : 'Apply Changes' }}</span>
+          <Undo2 :size="12" />
+          <span>Batalkan Tolak</span>
         </button>
       </div>
     </div>
 
-    <pre class="ws-code-pre"><code class="hljs" v-html="highlighted"></code></pre>
+    <!-- A proposed file change is reviewed in the editor's diff, not read here -
+         the chat column just carries a one-line summary and the decision. The
+         code stays available behind a toggle for anyone who wants it inline. -->
+    <template v-if="isFileChange">
+      <button class="ws-code-toggle" @click="isExpanded = !isExpanded">
+        <ChevronDown v-if="isExpanded" :size="12" />
+        <ChevronRight v-else :size="12" />
+        <span>{{ isExpanded ? 'Sembunyikan kode' : `Tampilkan kode (${lineCount} baris)` }}</span>
+      </button>
+      <pre v-if="isExpanded" class="ws-code-pre"><code class="hljs" v-html="highlighted"></code></pre>
+    </template>
+
+    <!-- Untargeted snippet (an example, a shell command): nothing to diff, so
+         it renders inline as ordinary code. -->
+    <pre v-else class="ws-code-pre"><code class="hljs" v-html="highlighted"></code></pre>
 
     <p v-if="!filePath && !isStreaming" class="ws-code-hint">
       Blok ini tidak diberi label path, jadi tidak bisa diterapkan otomatis. Minta AI menulis ulang
@@ -208,15 +264,60 @@ async function copyCode() {
   cursor: not-allowed;
 }
 
-.ws-code-btn--apply {
-  background: var(--color-accent-subtle);
-  border-color: rgba(139, 92, 246, 0.5);
-  color: var(--color-text-accent);
+.ws-code-btn--accept {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: var(--color-success);
 }
 
-.ws-code-btn--apply:hover:not(:disabled) {
-  background: var(--color-accent);
+.ws-code-btn--accept:hover:not(:disabled) {
+  background: var(--color-success);
   color: #fff;
+}
+
+.ws-code-btn--reject {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--color-danger);
+}
+
+.ws-code-btn--reject:hover:not(:disabled) {
+  background: var(--color-danger);
+  color: #fff;
+}
+
+.ws-code-decision-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 20px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ws-code-decision-badge--accepted {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--color-success);
+}
+
+.ws-code-decision-badge--rejected {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--color-danger);
+}
+
+.ws-code-card--accepted {
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.ws-code-card--rejected {
+  opacity: 0.6;
+}
+
+.ws-code-card--rejected .ws-code-pre {
+  text-decoration: line-through;
+  text-decoration-color: rgba(239, 68, 68, 0.4);
 }
 
 .ws-code-pre {
@@ -236,6 +337,28 @@ async function copyCode() {
 .ws-code-pre :deep(.hljs-number) { color: #fbbf24; }
 .ws-code-pre :deep(.hljs-title) { color: #60a5fa; }
 .ws-code-pre :deep(.hljs-attr) { color: #f472b6; }
+
+.ws-code-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  border-top: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.67rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.14s ease;
+}
+
+.ws-code-toggle:hover {
+  color: var(--color-text-accent);
+}
 
 .ws-code-hint {
   margin: 0;
