@@ -1,0 +1,460 @@
+<script setup>
+import { computed, ref } from 'vue'
+import hljs from 'highlight.js/lib/common'
+import {
+  Check,
+  X,
+  FileCode,
+  GitCompare,
+  Loader2,
+  AlertTriangle,
+  Eye,
+  RotateCcw,
+} from 'lucide-vue-next'
+import { diffLines, collapseUnchanged } from '../services/diff.js'
+
+const props = defineProps({
+  // { relPath, content, lines, truncated } or null when nothing is open.
+  file: { type: Object, default: null },
+  // { filePath, newContent } - a change the model proposed, awaiting review.
+  proposal: { type: Object, default: null },
+  isApplying: { type: Boolean, default: false },
+  isLoading: { type: Boolean, default: false },
+  errorMessage: { type: String, default: '' },
+})
+
+const emit = defineEmits(['apply', 'discard-proposal', 'close-file'])
+
+const showFullDiff = ref(false)
+
+const isDiffMode = computed(() => props.proposal !== null)
+
+const diffResult = computed(() => {
+  if (!props.proposal) return null
+  // A proposal for a file that isn't open (or a brand-new file) diffs against
+  // empty, which renders as an all-additions view - correct for file creation.
+  const baseline = props.file && props.file.relPath === props.proposal.filePath ? props.file.content : ''
+  return diffLines(baseline, props.proposal.newContent)
+})
+
+const diffRows = computed(() => {
+  if (!diffResult.value) return []
+  return showFullDiff.value ? diffResult.value.rows : collapseUnchanged(diffResult.value.rows, 3)
+})
+
+/** Syntax-highlighted lines for the plain (non-diff) view. */
+const highlightedLines = computed(() => {
+  if (!props.file) return []
+  const language = languageFor(props.file.relPath)
+  const code = props.file.content
+  if (language && hljs.getLanguage(language)) {
+    try {
+      const html = hljs.highlight(code, { language, ignoreIllegals: true }).value
+      return html.split('\n')
+    } catch {
+      // fall through to plain text
+    }
+  }
+  return code.split('\n').map(escapeHtml)
+})
+
+function languageFor(relPath) {
+  const extension = (relPath.split('.').pop() || '').toLowerCase()
+  const map = {
+    ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+    py: 'python', rb: 'ruby', php: 'php', go: 'go', rs: 'rust',
+    java: 'java', kt: 'kotlin', cs: 'csharp', cpp: 'cpp', c: 'c', h: 'c',
+    html: 'xml', xml: 'xml', svg: 'xml', vue: 'xml', svelte: 'xml',
+    css: 'css', scss: 'scss', less: 'less',
+    json: 'json', yml: 'yaml', yaml: 'yaml', sql: 'sql', md: 'markdown',
+    sh: 'bash', bash: 'bash', ps1: 'powershell',
+  }
+  return map[extension] || null
+}
+
+function escapeHtml(value) {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function applyProposal() {
+  if (!props.proposal) return
+  emit('apply', props.proposal)
+}
+</script>
+
+<template>
+  <section class="editor-pane">
+    <!-- Header -->
+    <header class="editor-header">
+      <div class="editor-title">
+        <GitCompare v-if="isDiffMode" :size="14" class="editor-title-icon editor-title-icon--diff" />
+        <FileCode v-else :size="14" class="editor-title-icon" />
+        <span class="editor-path" :title="proposal?.filePath || file?.relPath || ''">
+          {{ proposal?.filePath || file?.relPath || 'Tidak ada file terbuka' }}
+        </span>
+        <span v-if="isDiffMode" class="editor-badge editor-badge--diff">Usulan perubahan</span>
+        <span v-else-if="file?.truncated" class="editor-badge editor-badge--warn">Dipotong</span>
+      </div>
+
+      <div class="editor-actions">
+        <!-- Diff review controls -->
+        <template v-if="isDiffMode">
+          <span v-if="diffResult" class="diff-stats">
+            <span class="diff-stat diff-stat--add">+{{ diffResult.added }}</span>
+            <span class="diff-stat diff-stat--remove">-{{ diffResult.removed }}</span>
+          </span>
+          <button
+            class="editor-btn"
+            :title="showFullDiff ? 'Tampilkan hanya bagian yang berubah' : 'Tampilkan seluruh file'"
+            @click="showFullDiff = !showFullDiff"
+          >
+            <Eye :size="13" />
+            <span>{{ showFullDiff ? 'Ringkas' : 'Seluruh file' }}</span>
+          </button>
+          <button class="editor-btn" title="Batalkan usulan ini" @click="emit('discard-proposal')">
+            <RotateCcw :size="13" />
+            <span>Batal</span>
+          </button>
+          <button
+            class="editor-btn editor-btn--primary"
+            :disabled="isApplying"
+            title="Tulis perubahan ini ke file di disk"
+            @click="applyProposal"
+          >
+            <Loader2 v-if="isApplying" :size="13" class="spin" />
+            <Check v-else :size="13" />
+            <span>{{ isApplying ? 'Menerapkan...' : 'Apply Changes' }}</span>
+          </button>
+        </template>
+
+        <button v-else-if="file" class="editor-btn" title="Tutup file" @click="emit('close-file')">
+          <X :size="13" />
+        </button>
+      </div>
+    </header>
+
+    <!-- Body -->
+    <div class="editor-body">
+      <div v-if="errorMessage" class="editor-message editor-message--error">
+        <AlertTriangle :size="15" />
+        <span>{{ errorMessage }}</span>
+      </div>
+
+      <div v-else-if="isLoading" class="editor-message">
+        <Loader2 :size="15" class="spin" />
+        <span>Memuat file...</span>
+      </div>
+
+      <!-- Diff view -->
+      <div v-else-if="isDiffMode" class="diff-view">
+        <p v-if="diffResult?.approximate" class="diff-note">
+          File terlalu besar untuk dibandingkan baris per baris - bagian yang berubah ditampilkan sebagai blok pengganti.
+        </p>
+        <p v-if="diffResult && diffResult.added === 0 && diffResult.removed === 0" class="diff-note">
+          Tidak ada perbedaan dengan isi file saat ini.
+        </p>
+        <table class="diff-table">
+          <tbody>
+            <tr
+              v-for="(row, index) in diffRows"
+              :key="`${row.type}-${index}`"
+              class="diff-row"
+              :class="`diff-row--${row.type}`"
+            >
+              <td class="diff-gutter">{{ row.oldLine ?? '' }}</td>
+              <td class="diff-gutter">{{ row.newLine ?? '' }}</td>
+              <td class="diff-marker">
+                <template v-if="row.type === 'add'">+</template>
+                <template v-else-if="row.type === 'remove'">-</template>
+              </td>
+              <td class="diff-code">
+                <span v-if="row.type === 'gap'" class="diff-gap-text">⋯ {{ row.text }}</span>
+                <template v-else>{{ row.text || ' ' }}</template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Plain file view -->
+      <div v-else-if="file" class="code-view">
+        <table class="code-table">
+          <tbody>
+            <tr v-for="(line, index) in highlightedLines" :key="index" class="code-row">
+              <td class="code-gutter">{{ index + 1 }}</td>
+              <!-- eslint-disable-next-line vue/no-v-html -- hljs output, built from file text that was escaped first -->
+              <td class="code-line hljs" v-html="line || ' '"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Empty state -->
+      <div v-else class="editor-empty">
+        <FileCode :size="30" />
+        <p class="editor-empty-title">Belum ada file yang dibuka</p>
+        <p class="editor-empty-hint">
+          Pilih file dari daftar di kiri, atau minta AI di panel kanan - klik <strong>Diff View</strong>
+          pada blok kode jawabannya untuk melihat perbandingan di sini.
+        </p>
+      </div>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: var(--color-bg-primary);
+}
+
+.editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  min-height: 42px;
+  flex-shrink: 0;
+}
+
+.editor-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.editor-title-icon {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.editor-title-icon--diff {
+  color: #f59e0b;
+}
+
+.editor-path {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-badge {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 20px;
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.editor-badge--diff {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #f59e0b;
+}
+
+.editor-badge--warn {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: var(--color-danger);
+}
+
+.editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.diff-stats {
+  display: flex;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.diff-stat--add { color: var(--color-success); }
+.diff-stat--remove { color: var(--color-danger); }
+
+.editor-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+
+.editor-btn:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-light);
+}
+
+.editor-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.editor-btn--primary {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent);
+  color: var(--color-text-accent);
+}
+
+.editor-btn--primary:hover:not(:disabled) {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.editor-body {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+/* ===== Shared code/diff table ===== */
+.code-table,
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.55;
+}
+
+.code-gutter,
+.diff-gutter {
+  width: 1%;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--color-text-muted);
+  background: var(--color-bg-secondary);
+  border-right: 1px solid var(--color-border);
+  user-select: none;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.code-line,
+.diff-code {
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-primary);
+  vertical-align: top;
+}
+
+.code-line :deep(.hljs-keyword),
+.code-line :deep(.hljs-built_in) { color: #c084fc; }
+.code-line :deep(.hljs-string) { color: #86efac; }
+.code-line :deep(.hljs-comment) { color: var(--color-text-muted); font-style: italic; }
+.code-line :deep(.hljs-number) { color: #fbbf24; }
+.code-line :deep(.hljs-title),
+.code-line :deep(.hljs-function) { color: #60a5fa; }
+.code-line :deep(.hljs-attr),
+.code-line :deep(.hljs-property) { color: #f472b6; }
+
+.diff-marker {
+  width: 1%;
+  padding: 0 4px;
+  text-align: center;
+  font-weight: 700;
+  user-select: none;
+  vertical-align: top;
+}
+
+.diff-row--add { background: rgba(34, 197, 94, 0.12); }
+.diff-row--add .diff-marker,
+.diff-row--add .diff-code { color: #86efac; }
+
+.diff-row--remove { background: rgba(239, 68, 68, 0.12); }
+.diff-row--remove .diff-marker,
+.diff-row--remove .diff-code { color: #fca5a5; }
+
+.diff-row--gap { background: var(--color-bg-secondary); }
+
+.diff-gap-text {
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-size: 0.7rem;
+}
+
+.diff-note {
+  margin: 0;
+  padding: 8px 12px;
+  background: rgba(245, 158, 11, 0.1);
+  border-bottom: 1px solid var(--color-border);
+  color: #f59e0b;
+  font-size: 0.72rem;
+}
+
+/* ===== States ===== */
+.editor-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  color: var(--color-text-secondary);
+  font-size: 0.78rem;
+}
+
+.editor-message--error {
+  color: var(--color-danger);
+}
+
+.editor-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  padding: 32px 24px;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.editor-empty-title {
+  margin: 0;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.editor-empty-hint {
+  margin: 0;
+  max-width: 380px;
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.spin {
+  animation: editor-spin 1s linear infinite;
+}
+
+@keyframes editor-spin {
+  to { transform: rotate(360deg); }
+}
+</style>

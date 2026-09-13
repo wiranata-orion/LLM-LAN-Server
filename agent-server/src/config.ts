@@ -27,6 +27,33 @@ const envSchema = z.object({
   NUM_CTX_FALLBACK: z.coerce.number().int().positive().default(4096),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   MAX_TOOL_ROUNDS: z.coerce.number().int().positive().default(5),
+
+  // ===== Workspace (Vibe Coding) =====
+  // Code chunks are embedded with the same nomic-embed-text model as everything
+  // else, whose usable window is ~2k tokens - so a literal "300-500 lines per
+  // chunk" would be silently truncated by the embedder and produce vectors that
+  // describe only the top of each chunk. These caps keep a whole function in one
+  // chunk while staying inside what the embedder can actually read.
+  WORKSPACE_CHUNK_MAX_LINES: z.coerce.number().int().positive().default(160),
+  WORKSPACE_CHUNK_MAX_CHARS: z.coerce.number().int().positive().default(6000),
+  // Retrieval: how many code chunks a @workspace question may pull in.
+  WORKSPACE_MAX_CHUNKS: z.coerce.number().int().positive().default(5),
+  // Pure noise floor, NOT a relevance threshold. Measured on this project:
+  // prompts are Indonesian while the code is English, and nomic-embed-text
+  // scores that pairing so low (0.35-0.47, with unrelated text scoring 0.39)
+  // that any meaningful absolute cutoff also throws away the right answer.
+  // Relevance is decided by WORKSPACE_RELATIVE_SCORE_RATIO instead.
+  WORKSPACE_MIN_SCORE: z.coerce.number().min(-1).max(1).default(0.25),
+  // Keep chunks scoring at least this fraction of the best hit. The top match
+  // always survives; weaker ones only join it when they are nearly as good.
+  WORKSPACE_RELATIVE_SCORE_RATIO: z.coerce.number().min(0).max(1).default(0.82),
+  // Hard ceiling on injected code context, in tokens, to protect num_ctx.
+  WORKSPACE_CONTEXT_TOKEN_BUDGET: z.coerce.number().int().positive().default(2500),
+  // Files bigger than this are listed in the tree but never indexed or inlined.
+  WORKSPACE_MAX_FILE_BYTES: z.coerce.number().int().positive().default(512 * 1024),
+  // Parallel embedding requests during a full index. Higher finishes sooner but
+  // competes with chat generation for the same Ollama instance.
+  WORKSPACE_INDEX_CONCURRENCY: z.coerce.number().int().positive().default(3),
 })
 
 const parsed = envSchema.parse(process.env)
@@ -101,6 +128,32 @@ function writeChatHistoryPointer(chatHistoryRoot: string): void {
   writeFileSync(chatHistoryPointerPath, JSON.stringify({ chatHistoryRoot }, null, 2), 'utf8')
 }
 
+// ===== Workspace root (Vibe Coding mode) =====
+// The project folder the user is currently coding against. Like chat history
+// it has no default: unset simply means Workspace mode shows its folder picker
+// instead of a file tree. Remembered across restarts so reopening the app
+// lands back in the same project with its index already built.
+const workspacePointerPath = path.resolve(projectRoot, 'data', '.workspace-location.json')
+
+function readWorkspacePointer(): string | null {
+  try {
+    if (!existsSync(workspacePointerPath)) return null
+    const parsedPointer = JSON.parse(readFileSync(workspacePointerPath, 'utf8')) as { workspaceRoot?: string }
+    if (parsedPointer.workspaceRoot && path.isAbsolute(parsedPointer.workspaceRoot)) {
+      return parsedPointer.workspaceRoot
+    }
+    return null
+  } catch (error) {
+    console.warn(`Could not read workspace location pointer at ${workspacePointerPath}:`, error)
+    return null
+  }
+}
+
+function writeWorkspacePointer(workspaceRoot: string): void {
+  mkdirSync(path.dirname(workspacePointerPath), { recursive: true })
+  writeFileSync(workspacePointerPath, JSON.stringify({ workspaceRoot }, null, 2), 'utf8')
+}
+
 // Mutated in place by setMemoryRoot()/resetMemoryRootToDefault()/setChatHistoryRoot()/
 // clearChatHistoryRoot() below, so every module that destructures fields off this
 // same object reference sees updates immediately without needing a process restart.
@@ -122,6 +175,15 @@ export const config: {
   corsOrigins: string[]
   maxToolRounds: number
   chatHistoryRoot: string | null
+  workspaceRoot: string | null
+  workspaceChunkMaxLines: number
+  workspaceChunkMaxChars: number
+  workspaceMaxChunks: number
+  workspaceMinScore: number
+  workspaceRelativeScoreRatio: number
+  workspaceContextTokenBudget: number
+  workspaceMaxFileBytes: number
+  workspaceIndexConcurrency: number
 } = {
   port: parsed.PORT,
   ollamaBaseUrl: parsed.OLLAMA_BASE_URL.replace(/\/$/, ''),
@@ -140,6 +202,55 @@ export const config: {
   corsOrigins: parsed.CORS_ORIGIN.split(',').map((value) => value.trim()).filter(Boolean),
   maxToolRounds: parsed.MAX_TOOL_ROUNDS,
   chatHistoryRoot: readChatHistoryPointer(),
+  workspaceRoot: readWorkspacePointer(),
+  workspaceChunkMaxLines: parsed.WORKSPACE_CHUNK_MAX_LINES,
+  workspaceChunkMaxChars: parsed.WORKSPACE_CHUNK_MAX_CHARS,
+  workspaceMaxChunks: parsed.WORKSPACE_MAX_CHUNKS,
+  workspaceMinScore: parsed.WORKSPACE_MIN_SCORE,
+  workspaceRelativeScoreRatio: parsed.WORKSPACE_RELATIVE_SCORE_RATIO,
+  workspaceContextTokenBudget: parsed.WORKSPACE_CONTEXT_TOKEN_BUDGET,
+  workspaceMaxFileBytes: parsed.WORKSPACE_MAX_FILE_BYTES,
+  workspaceIndexConcurrency: parsed.WORKSPACE_INDEX_CONCURRENCY,
+}
+
+/** Where the workspace code index (its own SQLite file) lives for the active memory root. */
+export function getWorkspaceIndexPath(): string {
+  return path.join(config.memoryRoot, 'workspace-index.sqlite')
+}
+
+/**
+ * Backups of every file Vibe Coding overwrites. Deliberately kept outside the
+ * user's project folder: a backup written next to the source would itself get
+ * indexed, show up in the file tree, and end up committed to their repo.
+ */
+export function getWorkspaceBackupRoot(): string {
+  return path.join(config.memoryRoot, 'workspace-backups')
+}
+
+export function getWorkspaceRootInfo(): { workspaceRoot: string | null; isConfigured: boolean } {
+  return { workspaceRoot: config.workspaceRoot, isConfigured: config.workspaceRoot !== null }
+}
+
+export function setWorkspaceRoot(newRoot: string): { workspaceRoot: string } {
+  if (!newRoot || !newRoot.trim()) throw new Error('Path folder tidak boleh kosong')
+  if (!path.isAbsolute(newRoot)) throw new Error('Gunakan path folder absolut (contoh: D:\\projects\\app atau /home/user/app)')
+
+  const resolved = path.normalize(newRoot.trim())
+  if (!existsSync(resolved)) throw new Error(`Folder tidak ditemukan: ${resolved}`)
+
+  config.workspaceRoot = resolved
+  writeWorkspacePointer(resolved)
+  return { workspaceRoot: resolved }
+}
+
+export function clearWorkspaceRoot(): { workspaceRoot: null } {
+  config.workspaceRoot = null
+  try {
+    if (existsSync(workspacePointerPath)) unlinkSync(workspacePointerPath)
+  } catch (error) {
+    console.warn('Could not remove workspace location pointer:', error)
+  }
+  return { workspaceRoot: null }
 }
 
 export function getMemoryRootInfo(): { memoryRoot: string; isCustom: boolean; defaultMemoryRoot: string } {

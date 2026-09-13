@@ -8,20 +8,21 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test src/chunker.test.ts src/memory-core.test.ts src/vector-store.test.ts src/fs-browser.test.ts src/chat-history-store.test.ts src/rate-message.test.ts src/memory-search-quality.test.ts src/ingestion-guard.test.ts"
+    "test": "node --import tsx --test src/chunker.test.ts src/memory-core.test.ts src/vector-store.test.ts src/fs-browser.test.ts src/chat-history-store.test.ts src/rate-message.test.ts src/memory-search-quality.test.ts src/ingestion-guard.test.ts src/services/workspace.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
+    "chokidar": "^4.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.4",
-    "@types/better-sqlite3": "^7.6.12",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"
   }
