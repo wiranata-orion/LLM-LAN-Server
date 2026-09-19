@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import {
   ChevronRight,
   ChevronDown,
@@ -10,8 +10,10 @@ import {
   RefreshCw,
   Search,
   AlertCircle,
+  ListPlus,
 } from 'lucide-vue-next'
 import { listWorkspaceTree } from '../services/workspace.ts'
+import { addFileAsContext } from '../services/workspaceStore.js'
 
 const props = defineProps({
   activePath: { type: String, default: '' },
@@ -127,6 +129,36 @@ function handleRowClick(entry) {
   emit('open-file', entry.relPath)
 }
 
+function handleAddContext(entry, event) {
+  event.stopPropagation()
+  addFileAsContext(entry.relPath)
+}
+
+// ===== Reveal the active file: expand + load every ancestor directory and
+// scroll it into view. Runs whenever the file open elsewhere (the editor, a
+// chat proposal) changes, so the sidebar always shows where that file lives
+// instead of leaving it hidden inside a collapsed folder. =====
+const treeBodyRef = ref(null)
+
+async function revealPath(relPath) {
+  const segments = relPath.split('/').filter(Boolean)
+  segments.pop() // only ancestor directories need expanding, not the file itself
+  let ancestor = ''
+  for (const segment of segments) {
+    ancestor = ancestor ? `${ancestor}/${segment}` : segment
+    if (!childrenByPath.value[ancestor]) await loadDirectory(ancestor)
+    if (!expanded.value.has(ancestor)) {
+      expanded.value = new Set(expanded.value).add(ancestor)
+    }
+  }
+  await nextTick()
+  treeBodyRef.value?.querySelector('.tree-row--active')?.scrollIntoView({ block: 'nearest' })
+}
+
+watch(() => props.activePath, (next) => {
+  if (next) revealPath(next)
+}, { immediate: true })
+
 /** Reloads the root and every directory currently expanded, keeping the shape. */
 async function refresh() {
   const openDirectories = ['', ...expanded.value]
@@ -170,8 +202,8 @@ defineExpose({ refresh })
       <span>{{ errorMessage }}</span>
     </div>
 
-    <div class="file-tree-body">
-      <button
+    <div ref="treeBodyRef" class="file-tree-body">
+      <div
         v-for="row in visibleRows"
         :key="row.relPath"
         class="tree-row"
@@ -185,7 +217,10 @@ defineExpose({ refresh })
           : (row.type === 'file' && !row.indexable
             ? `${row.relPath} - tidak diindeks (format atau ukurannya di luar jangkauan)`
             : row.relPath)"
+        role="button"
+        tabindex="0"
         @click="handleRowClick(row)"
+        @keydown.enter="handleRowClick(row)"
       >
         <template v-if="row.type === 'directory'">
           <ChevronDown v-if="row.isExpanded" :size="12" class="tree-chevron" />
@@ -204,7 +239,15 @@ defineExpose({ refresh })
 
         <span class="tree-name">{{ row.name }}</span>
         <span v-if="row.type === 'file' && row.size" class="tree-size">{{ formatSize(row.size) }}</span>
-      </button>
+        <button
+          v-if="row.type === 'file'"
+          class="tree-add-context-btn"
+          title="Tambahkan file ini sebagai context untuk AI Coding Assistant"
+          @click="handleAddContext(row, $event)"
+        >
+          <ListPlus :size="12" />
+        </button>
+      </div>
 
       <p v-if="!visibleRows.length" class="file-tree-empty">
         {{ filterText ? 'Tidak ada file yang cocok.' : 'Folder kosong.' }}
@@ -387,6 +430,32 @@ defineExpose({ refresh })
   font-size: 0.65rem;
   color: var(--color-text-muted);
   font-family: var(--font-mono);
+}
+
+.tree-add-context-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.tree-row:hover .tree-add-context-btn {
+  opacity: 1;
+}
+
+.tree-add-context-btn:hover {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
 }
 
 .file-tree-empty {

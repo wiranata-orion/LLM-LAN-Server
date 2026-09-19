@@ -9,9 +9,10 @@ import {
   Loader2,
   AlertTriangle,
   Eye,
-
+  ListPlus,
 } from 'lucide-vue-next'
 import { diffLines, collapseUnchanged } from '../services/diff.js'
+import { addSelectionAsContext } from '../services/workspaceStore.js'
 
 const props = defineProps({
   // { relPath, content, lines, truncated } or null when nothing is open.
@@ -44,6 +45,27 @@ const diffResult = computed(() => {
 const diffRows = computed(() => {
   if (!diffResult.value) return []
   return showFullDiff.value ? diffResult.value.rows : collapseUnchanged(diffResult.value.rows, 3)
+})
+
+/**
+ * A weak local model that loses track of the request sometimes discards the
+ * file and writes something unrelated instead of a targeted edit - the surest
+ * sign of that is a huge chunk of the original file vanishing. This flags it
+ * so the user double-checks before writing it to disk, instead of the diff
+ * stats (+N/-N) quietly speaking for themselves in a corner of the header.
+ */
+const destructiveWarning = computed(() => {
+  if (!diffResult.value || isStreamingProposal.value) return null
+  const isExistingFile = props.file && props.file.relPath === props.proposal?.filePath
+  if (!isExistingFile) return null
+  const baselineLines = props.file.content ? props.file.content.split('\n').length : 0
+  if (baselineLines < 6) return null
+  const removed = diffResult.value.removed
+  const added = diffResult.value.added
+  if (removed < Math.max(8, baselineLines * 0.4)) return null
+  if (added > removed * 0.6) return null // a genuine large rewrite the user asked for, not a wipe
+  const percent = Math.round((removed / baselineLines) * 100)
+  return `Perubahan ini menghapus ${removed} dari ${baselineLines} baris asli file (~${percent}%) tanpa menambahkan proporsi kode yang sepadan - ini bisa jadi tanda AI menulis ulang file tanpa arah yang jelas. Periksa dengan teliti sebelum menekan "Ya".`
 })
 
 /** Syntax-highlighted lines for the plain (non-diff) view. */
@@ -106,6 +128,82 @@ watch(
 watch(() => props.proposal?.filePath, () => {
   userScrolledAway.value = false
 })
+
+// A likely destructive rewrite (see destructiveWarning above) needs a second,
+// explicit confirmation before "Ya" actually writes it to disk.
+const confirmingDestructive = ref(false)
+watch(() => props.proposal, () => { confirmingDestructive.value = false })
+
+function confirmDestructiveAccept() {
+  confirmingDestructive.value = false
+  emit('accept')
+}
+
+// ===== "Add selection to context" =====
+// Selecting a range in the plain (non-diff) file view surfaces a small button
+// near the selection, so the user can hand the AI exactly the lines that
+// matter instead of the whole file - the same mechanism that keeps the AI
+// from being asked to blindly rewrite a file it can only see part of (see
+// SHARED_RULES in workspace-rag.ts on the agent-server).
+const codeViewRef = ref(null)
+const selectionAction = ref(null) // { top, left, startLine, endLine, snippet } | null
+
+function clearSelectionAction() {
+  selectionAction.value = null
+}
+
+function handleCodeSelection() {
+  const selection = window.getSelection()
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    clearSelectionAction()
+    return
+  }
+  const container = codeViewRef.value
+  if (!container) return
+  const range = selection.getRangeAt(0)
+  if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) {
+    clearSelectionAction()
+    return
+  }
+
+  const startRow = range.startContainer.nodeType === 1
+    ? range.startContainer.closest('tr[data-line]')
+    : range.startContainer.parentElement?.closest('tr[data-line]')
+  const endRow = range.endContainer.nodeType === 1
+    ? range.endContainer.closest('tr[data-line]')
+    : range.endContainer.parentElement?.closest('tr[data-line]')
+  if (!startRow || !endRow) {
+    clearSelectionAction()
+    return
+  }
+
+  const startLine = Math.min(Number(startRow.dataset.line), Number(endRow.dataset.line))
+  const endLine = Math.max(Number(startRow.dataset.line), Number(endRow.dataset.line))
+  const rect = range.getBoundingClientRect()
+  const containerRect = container.getBoundingClientRect()
+  selectionAction.value = {
+    top: rect.top - containerRect.top + container.scrollTop,
+    left: rect.left - containerRect.left,
+    startLine,
+    endLine,
+    snippet: selection.toString(),
+  }
+}
+
+watch(() => props.file?.relPath, clearSelectionAction)
+
+function addCurrentSelectionToContext() {
+  const action = selectionAction.value
+  if (!action || !props.file) return
+  addSelectionAsContext({
+    relPath: props.file.relPath,
+    startLine: action.startLine,
+    endLine: action.endLine,
+    snippet: action.snippet,
+  })
+  clearSelectionAction()
+  window.getSelection()?.removeAllRanges()
+}
 </script>
 
 <template>
@@ -154,15 +252,17 @@ watch(() => props.proposal?.filePath, () => {
           </button>
           <button
             class="editor-btn editor-btn--yes"
+            :class="{ 'editor-btn--danger': destructiveWarning }"
             :disabled="isApplying || isStreamingProposal"
             :title="isStreamingProposal
               ? 'Tunggu sampai AI selesai menulis'
-              : 'Ya - tulis perubahan ini ke file di disk'"
-            @click="emit('accept')"
+              : (destructiveWarning || 'Ya - tulis perubahan ini ke file di disk')"
+            @click="destructiveWarning ? (confirmingDestructive = true) : emit('accept')"
           >
             <Loader2 v-if="isApplying" :size="13" class="spin" />
+            <AlertTriangle v-else-if="destructiveWarning" :size="13" />
             <Check v-else :size="13" />
-            <span>{{ isApplying ? 'Menerapkan...' : 'Ya' }}</span>
+            <span>{{ isApplying ? 'Menerapkan...' : (destructiveWarning ? 'Ya, tapi...' : 'Ya') }}</span>
           </button>
         </template>
 
@@ -197,6 +297,19 @@ watch(() => props.proposal?.filePath, () => {
         >
           Tidak ada perbedaan dengan isi file saat ini.
         </p>
+        <div v-if="destructiveWarning" class="diff-warning-banner">
+          <AlertTriangle :size="15" class="diff-warning-icon" />
+          <div class="diff-warning-body">
+            <p class="diff-warning-text">{{ destructiveWarning }}</p>
+            <div v-if="confirmingDestructive" class="diff-warning-actions">
+              <span>Tetap terapkan perubahan ini ke file?</span>
+              <button class="editor-btn" @click="confirmingDestructive = false">Batal</button>
+              <button class="editor-btn editor-btn--danger" @click="confirmDestructiveAccept">
+                <Check :size="12" /><span>Ya, tetap terapkan</span>
+              </button>
+            </div>
+          </div>
+        </div>
         <table class="diff-table">
           <tbody>
             <tr
@@ -221,16 +334,26 @@ watch(() => props.proposal?.filePath, () => {
       </div>
 
       <!-- Plain file view -->
-      <div v-else-if="file" class="code-view">
+      <div v-else-if="file" ref="codeViewRef" class="code-view" @mouseup="handleCodeSelection">
         <table class="code-table">
           <tbody>
-            <tr v-for="(line, index) in highlightedLines" :key="index" class="code-row">
+            <tr v-for="(line, index) in highlightedLines" :key="index" class="code-row" :data-line="index + 1">
               <td class="code-gutter">{{ index + 1 }}</td>
               <!-- eslint-disable-next-line vue/no-v-html -- hljs output, built from file text that was escaped first -->
               <td class="code-line hljs" v-html="line || ' '"></td>
             </tr>
           </tbody>
         </table>
+
+        <button
+          v-if="selectionAction"
+          class="selection-context-btn"
+          :style="{ top: `${selectionAction.top}px`, left: `${selectionAction.left}px` }"
+          @click="addCurrentSelectionToContext"
+        >
+          <ListPlus :size="12" />
+          <span>Tambah ke context ({{ selectionAction.startLine === selectionAction.endLine ? `baris ${selectionAction.startLine}` : `baris ${selectionAction.startLine}-${selectionAction.endLine}` }})</span>
+        </button>
       </div>
 
       <!-- Empty state -->
@@ -392,6 +515,55 @@ watch(() => props.proposal?.filePath, () => {
   color: #fff;
 }
 
+/* A likely destructive rewrite: "Ya" turns into a warning colour instead of
+   the usual green, so it doesn't read as a routine, safe confirmation. */
+.editor-btn--danger {
+  background: rgba(245, 158, 11, 0.16) !important;
+  border-color: rgba(245, 158, 11, 0.55) !important;
+  color: #f59e0b !important;
+}
+
+.editor-btn--danger:hover:not(:disabled) {
+  background: #f59e0b !important;
+  color: #fff !important;
+}
+
+.diff-warning-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+}
+
+.diff-warning-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.diff-warning-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.diff-warning-text {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.55;
+  color: #f59e0b;
+}
+
+.diff-warning-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 0.74rem;
+  color: var(--color-text-secondary);
+}
+
 /* Pulses while the model is still writing the change into this pane. */
 .editor-badge--live {
   display: inline-flex;
@@ -412,6 +584,44 @@ watch(() => props.proposal?.filePath, () => {
   flex: 1;
   overflow: auto;
   min-height: 0;
+}
+
+.code-view {
+  position: relative;
+}
+
+/* Appears near a text selection made in the plain file view (see
+   handleCodeSelection) - lets the user hand the AI exactly the lines that
+   matter instead of the whole file. */
+.selection-context-btn {
+  position: absolute;
+  transform: translateY(-100%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--color-accent);
+  border-radius: 7px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-accent);
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  z-index: 5;
+  animation: selectionBtnIn 0.12s ease;
+}
+
+.selection-context-btn:hover {
+  background: var(--color-accent);
+  color: var(--color-on-accent, white);
+}
+
+@keyframes selectionBtnIn {
+  from { opacity: 0; transform: translateY(-100%) scale(0.92); }
+  to { opacity: 1; transform: translateY(-100%) scale(1); }
 }
 
 /* ===== Shared code/diff table ===== */

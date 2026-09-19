@@ -9,6 +9,7 @@ import {
   getWorkspaceIndexPath,
   setWorkspaceRoot,
 } from '../config.js'
+import { decodeFileBuffer } from '../encoding.js'
 import { embed } from '../ollama.js'
 import { chunkCode, describeChunk } from './workspace-chunker.js'
 import { WorkspaceFilter, isIndexableExtension, looksBinary } from './workspace-ignore.js'
@@ -332,7 +333,7 @@ export class WorkspaceManager {
 
     let content: string
     try {
-      content = await readFile(absolutePath, 'utf8')
+      content = decodeFileBuffer(await readFile(absolutePath))
     } catch {
       return 'skipped'
     }
@@ -601,7 +602,7 @@ export class WorkspaceManager {
     if (!fileStat.isFile()) throw new Error('Bukan file')
 
     const maxBytes = config.workspaceMaxFileBytes
-    const raw = await readFile(absolutePath, 'utf8')
+    const raw = decodeFileBuffer(await readFile(absolutePath))
     const truncated = fileStat.size > maxBytes
     const content = truncated ? raw.slice(0, maxBytes) : raw
 
@@ -639,7 +640,7 @@ export class WorkspaceManager {
     if (exists) {
       const existingStat = await stat(absolutePath)
       if (!existingStat.isFile()) throw new Error(`"${normalizedRel}" bukan file`)
-      previousContent = await readFile(absolutePath, 'utf8').catch(() => null)
+      previousContent = await readFile(absolutePath).then(decodeFileBuffer).catch(() => null)
 
       if (previousContent !== null) {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')

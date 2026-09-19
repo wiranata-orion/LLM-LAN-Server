@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import crypto from 'node:crypto'
 import { chunkText } from './chunker.js'
+import { decodeFileBuffer } from './encoding.js'
 import { embed } from './ollama.js'
 import { VectorStore } from './vector-store.js'
 import type { DocumentInput, VectorRecord } from './types.js'
@@ -66,7 +67,7 @@ export class IngestionService {
   }
 
   async ingestFile(filePath: string): Promise<{ documents: number; chunks: number }> {
-    const content = await readFile(filePath, 'utf8')
+    const content = decodeFileBuffer(await readFile(filePath))
     return this.ingest([{ source: filePath, content }])
   }
 }
