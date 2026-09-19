@@ -731,7 +731,7 @@ function getFolderDisplayName(f) {
 
 .folder-action-btn:hover {
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-accent-subtle);
 }
 
 .folder-action-btn--locked {
@@ -871,7 +871,7 @@ function getFolderDisplayName(f) {
 
 .conv-action-btn:hover {
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-accent-subtle);
 }
 
 .conv-action-btn--delete:hover {

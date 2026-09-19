@@ -57,6 +57,58 @@ export const messages = ref([])
 export const isGenerating = ref(false)
 export const chatError = ref('')
 
+// ===== Chat mode: 'code' (AI may rewrite files) vs 'ask' (read-only Q&A) =====
+// A toggle next to the send button, not something inferred from the wording of
+// the prompt - guessing intent from phrasing is exactly what let the AI treat
+// an ambiguous message as licence to rewrite a file nobody asked it to touch.
+function readStoredChatMode() {
+  try {
+    const stored = localStorage.getItem('vibe_chat_mode')
+    return stored === 'ask' ? 'ask' : 'code'
+  } catch (e) {
+    return 'code'
+  }
+}
+
+export const chatMode = ref(readStoredChatMode())
+
+export function setChatMode(mode) {
+  if (mode !== 'code' && mode !== 'ask') return
+  chatMode.value = mode
+  try {
+    localStorage.setItem('vibe_chat_mode', mode)
+  } catch (e) {}
+}
+
+// ===== Explicit context attachments =====
+// Whole files or specific line ranges the user deliberately attached from the
+// UI (the composer's "+" file picker, or "add selection to context" in the
+// editor) - distinct from an "@path" typed into the prompt text, and cleared
+// once the message that used them is sent.
+export const contextAttachments = ref([])
+
+function attachmentKey(attachment) {
+  return `${attachment.relPath}:${attachment.startLine ?? ''}-${attachment.endLine ?? ''}`
+}
+
+export function addFileAsContext(relPath) {
+  const attachment = { relPath }
+  const key = attachmentKey(attachment)
+  if (contextAttachments.value.some((a) => attachmentKey(a) === key)) return
+  contextAttachments.value = [...contextAttachments.value, attachment]
+}
+
+export function addSelectionAsContext({ relPath, startLine, endLine, snippet }) {
+  const attachment = { relPath, startLine, endLine, snippet }
+  const key = attachmentKey(attachment)
+  if (contextAttachments.value.some((a) => attachmentKey(a) === key)) return
+  contextAttachments.value = [...contextAttachments.value, attachment]
+}
+
+export function removeContextAttachment(index) {
+  contextAttachments.value = contextAttachments.value.filter((_, i) => i !== index)
+}
+
 // ===== AI Coding Assistant: saved chat sessions, scoped per project =====
 // Mirrors Conversation mode's chat list, but for the workspace chat: a list
 // the user can pick from, persisted server-side under the open project (see
@@ -363,7 +415,13 @@ export async function sendChatPrompt(prompt, { selectedModel } = {}) {
   if (isGenerating.value) return
   chatError.value = ''
 
-  messages.value.push({ role: 'user', content: prompt })
+  // Attachments belong to this turn only - snapshot and clear them from the
+  // composer immediately, so they don't silently get resent on the next message.
+  const attachments = contextAttachments.value
+  contextAttachments.value = []
+  const mode = chatMode.value
+
+  messages.value.push({ role: 'user', content: prompt, mode, attachments })
   const assistantIndex = messages.value.push({ role: 'assistant', content: '', contextBlocks: [] }) - 1
   // Fire-and-forget: the user's turn is worth saving immediately, in case the
   // tab closes before the reply finishes (mirrors Conversation mode's own
@@ -387,6 +445,8 @@ export async function sendChatPrompt(prompt, { selectedModel } = {}) {
       model: selectedModel || undefined,
       targetPath: openFile.value?.relPath || undefined,
       history,
+      mode,
+      attachments: attachments.map(({ relPath, startLine, endLine }) => ({ relPath, startLine, endLine })),
       signal: abortController.signal,
       handlers: {
         onContext: (payload) => {

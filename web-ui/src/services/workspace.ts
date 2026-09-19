@@ -152,6 +152,16 @@ export interface WorkspaceChatHandlers {
   onToken: (content: string) => void
 }
 
+/** 'code' (default): AI may propose file rewrites. 'ask': read-only Q&A, never proposes edits. */
+export type WorkspaceChatMode = 'code' | 'ask'
+
+/** A file (or a specific line range within one) the user explicitly attached as context. */
+export interface WorkspaceContextAttachment {
+  relPath: string
+  startLine?: number
+  endLine?: number
+}
+
 /**
  * Streams one Vibe Coding answer. Same ndjson wire format as the conversation
  * endpoint, plus `context` events describing which files were fed to the model.
@@ -162,12 +172,16 @@ export async function sendWorkspaceChat(
     model,
     targetPath,
     history,
+    mode,
+    attachments,
     signal,
     handlers,
   }: {
     model?: string
     targetPath?: string
     history?: Array<{ role: 'user' | 'assistant'; content: string }>
+    mode?: WorkspaceChatMode
+    attachments?: WorkspaceContextAttachment[]
     signal: AbortSignal
     handlers: WorkspaceChatHandlers
   },
@@ -183,6 +197,8 @@ export async function sendWorkspaceChat(
         model,
         targetPath,
         history,
+        mode,
+        attachments,
         ollamaBaseUrl: resolveOllamaBaseUrl(),
         options: resolveChatOptions(),
       }),

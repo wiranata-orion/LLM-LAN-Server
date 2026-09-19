@@ -1236,7 +1236,7 @@ onUnmounted(() => {
 
 .model-rename-btn:hover {
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-accent-subtle);
 }
 
 .model-nickname-edit {
@@ -1510,7 +1510,7 @@ onUnmounted(() => {
   background: var(--color-bg-tertiary);
   padding: 1px 6px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--color-border);
 }
 
 .section-empty-hint {
@@ -1525,7 +1525,7 @@ onUnmounted(() => {
 .collapsible-section-content {
   padding-left: 10px;
   margin-left: 6px;
-  border-left: 1.5px solid rgba(255, 255, 255, 0.07);
+  border-left: 1.5px solid var(--color-border);
   transition: all 0.2s ease;
 }
 
@@ -1707,7 +1707,7 @@ onUnmounted(() => {
 
 .folder-action-btn:hover {
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-accent-subtle);
 }
 
 .folder-action-btn--locked {
@@ -1809,7 +1809,7 @@ onUnmounted(() => {
 
 .conv-action-btn:hover {
   color: var(--color-text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--color-accent-subtle);
 }
 
 .conv-action-btn--delete:hover {

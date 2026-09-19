@@ -29,6 +29,12 @@ const chatOptionsSchema = z.object({
   num_predict: z.number().int().optional(),
 })
 
+const contextAttachmentSchema = z.object({
+  relPath: z.string().min(1),
+  startLine: z.number().int().positive().optional(),
+  endLine: z.number().int().positive().optional(),
+})
+
 const workspaceChatSchema = z.object({
   prompt: z.string().min(1),
   model: z.string().min(1).optional(),
@@ -39,6 +45,10 @@ const workspaceChatSchema = z.object({
     role: z.enum(['system', 'user', 'assistant', 'tool']),
     content: z.string(),
   })).optional(),
+  // 'code' (default): may propose file rewrites. 'ask': read-only Q&A, never proposes edits.
+  mode: z.enum(['code', 'ask']).optional(),
+  // Files/line ranges the user explicitly attached as context from the UI.
+  attachments: z.array(contextAttachmentSchema).optional(),
 })
 
 const saveChatSessionSchema = z.object({
@@ -211,7 +221,10 @@ export function createWorkspaceRouter(): Router {
   router.post('/context-preview', async (request, response) => {
     try {
       const body = workspaceChatSchema.parse(request.body)
-      const context = await buildWorkspaceContext(body.prompt, body.targetPath)
+      const context = await buildWorkspaceContext(body.prompt, body.targetPath, {
+        mode: body.mode,
+        attachments: body.attachments,
+      })
       response.json({
         ok: true,
         blocks: context.blocks,
@@ -257,6 +270,8 @@ export function createWorkspaceRouter(): Router {
       write({ type: 'context-start' })
       const context = await buildWorkspaceContext(body.prompt, body.targetPath, {
         history: body.history as ChatMessage[] | undefined,
+        mode: body.mode,
+        attachments: body.attachments,
       })
       write({
         type: 'context',

@@ -895,7 +895,7 @@ function resetDefaults() {
                 <div class="toggle-title-row">
                   <Wand2 :size="15" class="toggle-icon" />
                   <label class="form-label">
-                    Aktifkan Mode Otomatis &bull &bull;
+                    Aktifkan Mode Otomatis &bull;
                     <span class="active-gpu-label">{{ activeEngine === 'pc' ? 'PC (Server)' : 'Laptop (Local)' }}</span>
                   </label>
                 </div>

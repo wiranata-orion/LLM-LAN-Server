@@ -169,28 +169,37 @@ onUnmounted(() => {
           @close-file="closeWorkspaceFile"
         />
 
-        <template v-if="!chatCollapsed">
-          <div
-            class="ws-chat-resize-handle"
-            :class="{ 'ws-chat-resize-handle--active': isResizingChat }"
-            @mousedown="startChatResize"
-            title="Seret untuk mengubah lebar panel AI"
-          ></div>
-          <WorkspaceChatPanel
-            class="ws-pane-chat"
-            :style="{ width: chatWidth + 'px' }"
-            :messages="messages"
-            :is-generating="isGenerating"
-            :files="files"
-            :active-file-path="openFile?.relPath || ''"
-            :applying-path="applyingPath"
-            :error-message="chatError"
-            @send="handleSend"
-            @stop="stopChatGeneration"
-            @collapse="collapseChat"
-          />
-        </template>
-        <button v-else class="ws-chat-reopen-tab" @click="expandChat" title="Buka AI Coding Assistant">
+        <!-- Always mounted (rather than v-if'd away) so collapsing/expanding is a
+             smooth width transition instead of the panel vanishing/remounting
+             instantly, and so its scroll position and in-progress input survive. -->
+        <div
+          v-show="!chatCollapsed"
+          class="ws-chat-resize-handle"
+          :class="{ 'ws-chat-resize-handle--active': isResizingChat }"
+          @mousedown="startChatResize"
+          title="Seret untuk mengubah lebar panel AI"
+        ></div>
+        <WorkspaceChatPanel
+          class="ws-pane-chat"
+          :class="{ 'ws-pane-chat--collapsed': chatCollapsed }"
+          :style="{ width: chatCollapsed ? '0px' : chatWidth + 'px' }"
+          :messages="messages"
+          :is-generating="isGenerating"
+          :files="files"
+          :active-file-path="openFile?.relPath || ''"
+          :applying-path="applyingPath"
+          :error-message="chatError"
+          @send="handleSend"
+          @stop="stopChatGeneration"
+          @collapse="collapseChat"
+        />
+        <button
+          class="ws-chat-reopen-tab"
+          :class="{ 'ws-chat-reopen-tab--visible': chatCollapsed }"
+          @click="expandChat"
+          title="Buka AI Coding Assistant"
+          :tabindex="chatCollapsed ? 0 : -1"
+        >
           <PanelRightOpen :size="16" />
         </button>
       </div>
@@ -347,6 +356,12 @@ onUnmounted(() => {
 .ws-pane-chat {
   flex: none;
   min-height: 0;
+  overflow: hidden;
+  transition: width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.ws-pane-chat--collapsed {
+  border-left: none;
 }
 
 .ws-chat-resize-handle {
@@ -354,7 +369,7 @@ onUnmounted(() => {
   width: 5px;
   cursor: col-resize;
   background: transparent;
-  transition: background 0.12s ease;
+  transition: background 0.12s ease, width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .ws-chat-resize-handle:hover,
@@ -368,13 +383,20 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 28px;
+  width: 0;
+  overflow: hidden;
   border: none;
-  border-left: 1px solid var(--color-border);
   background: var(--color-bg-secondary);
   color: var(--color-text-muted);
   cursor: pointer;
-  transition: all 0.16s ease;
+  opacity: 0;
+  transition: width 0.24s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.18s ease, color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+}
+
+.ws-chat-reopen-tab--visible {
+  width: 28px;
+  opacity: 1;
+  border-left: 1px solid var(--color-border);
 }
 
 .ws-chat-reopen-tab:hover {

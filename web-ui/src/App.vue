@@ -967,7 +967,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
 }
 
 .engine-status-pill--pc .engine-dot--online {
-  background: #00FF00;
+  background: #10b981;
   box-shadow: 0 0 8px rgba(16, 185, 129, 0.8), 0 0 12px rgba(34, 197, 94, 0.4);
   animation: dotPulseEmerald 2.5s infinite ease-in-out;
 }
@@ -987,7 +987,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
 }
 
 .engine-status-pill--laptop .engine-dot--online {
-  background: #00ff00;
+  background: #06b6d4;
   box-shadow: 0 0 8px rgba(6, 182, 212, 0.8), 0 0 12px rgba(59, 130, 246, 0.4);
   animation: dotPulseCyan 2.5s infinite ease-in-out;
 }

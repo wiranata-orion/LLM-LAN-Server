@@ -15,6 +15,10 @@ import {
   History,
   Plus,
   Trash2,
+  X,
+  Wrench,
+  CircleQuestionMark,
+  ListPlus,
 } from 'lucide-vue-next'
 import WorkspaceCodeBlock from './WorkspaceCodeBlock.vue'
 import { parseWorkspaceReplySegments, deriveFallbackFilePath } from '../services/workspaceChatParsing.js'
@@ -30,6 +34,11 @@ import {
   acceptChange,
   rejectChange,
   requestDiff,
+  chatMode,
+  setChatMode,
+  contextAttachments,
+  addFileAsContext,
+  removeContextAttachment,
 } from '../services/workspaceStore.js'
 
 const props = defineProps({
@@ -173,6 +182,32 @@ function moveMentionSelection(delta) {
   })
 }
 
+// ===== "+" context picker: explicitly attach a whole file, without typing
+// "@" in the message text. Same file list as the "@" autocomplete. =====
+const showAttachMenu = ref(false)
+const attachWrapperRef = ref(null)
+const attachSearch = ref('')
+
+const attachMatches = computed(() => {
+  const query = attachSearch.value.trim().toLowerCase()
+  const pool = props.files
+  const matches = query ? pool.filter((file) => file.toLowerCase().includes(query)) : pool
+  return matches
+    .slice()
+    .sort((left, right) => left.split('/').length - right.split('/').length || left.localeCompare(right))
+    .slice(0, 30)
+})
+
+function toggleAttachMenu() {
+  showAttachMenu.value = !showAttachMenu.value
+  attachSearch.value = ''
+}
+
+function pickAttachFile(filePath) {
+  addFileAsContext(filePath)
+  showAttachMenu.value = false
+}
+
 function handleKeydown(event) {
   if (mentionQuery.value !== null && mentionMatches.value.length) {
     if (event.key === 'ArrowDown') {
@@ -293,6 +328,9 @@ function handleClickOutsideHistory(event) {
   if (historyWrapperRef.value && !historyWrapperRef.value.contains(event.target)) {
     showHistoryMenu.value = false
   }
+  if (attachWrapperRef.value && !attachWrapperRef.value.contains(event.target)) {
+    showAttachMenu.value = false
+  }
 }
 
 /** Compact "5 menit lalu" style relative time for the history list. */
@@ -406,6 +444,19 @@ function reasonLabel(reason) {
             </span>
           </div>
 
+          <!-- Files/snippets explicitly attached from the "+" picker or an editor selection -->
+          <div v-if="message.attachments?.length" class="ws-context-chips">
+            <span
+              v-for="(attachment, index) in message.attachments"
+              :key="`${attachment.relPath}-${index}`"
+              class="ws-context-chip ws-context-chip--explicit"
+              :title="attachment.startLine ? `${attachment.relPath} (baris ${attachment.startLine}-${attachment.endLine})` : attachment.relPath"
+            >
+              <ListPlus :size="10" />
+              {{ attachment.relPath.split('/').pop() }}{{ attachment.startLine ? ` (L${attachment.startLine}${attachment.endLine !== attachment.startLine ? '-' + attachment.endLine : ''})` : '' }}
+            </span>
+          </div>
+
           <!-- eslint-disable-next-line vue/no-v-html -- HTML-escaped first; only wraps @mentions in a tag span -->
           <div v-if="message.role === 'user'" class="ws-user-text" v-html="renderUserMessage(message.content)"></div>
 
@@ -466,13 +517,29 @@ function reasonLabel(reason) {
         </button>
       </div>
 
+      <!-- Pending context attachments for the next message -->
+      <div v-if="contextAttachments.length" class="ws-pending-attachments">
+        <span
+          v-for="(attachment, index) in contextAttachments"
+          :key="`${attachment.relPath}-${index}`"
+          class="ws-pending-attachment-chip"
+          :title="attachment.startLine ? `${attachment.relPath} (baris ${attachment.startLine}-${attachment.endLine})` : attachment.relPath"
+        >
+          <ListPlus :size="11" />
+          <span class="ws-pending-attachment-name">{{ attachment.relPath.split('/').pop() }}{{ attachment.startLine ? ` (L${attachment.startLine}${attachment.endLine !== attachment.startLine ? '-' + attachment.endLine : ''})` : '' }}</span>
+          <button class="ws-pending-attachment-remove" title="Hapus dari context" @click="removeContextAttachment(index)">
+            <X :size="10" />
+          </button>
+        </span>
+      </div>
+
       <div class="ws-composer-box">
         <textarea
           ref="textareaRef"
           v-model="input"
           rows="1"
           class="ws-textarea"
-          :placeholder="isGenerating ? 'AI sedang menjawab...' : 'Tanya, atau ketik @ untuk memilih file...'"
+          :placeholder="isGenerating ? 'AI sedang menjawab...' : (chatMode === 'ask' ? 'Tanya apa saja tentang proyek ini, atau ketik @ untuk memilih file...' : 'Minta AI mengubah kode, atau ketik @ untuk memilih file...')"
           @keydown="handleKeydown"
           @keyup="updateMentionState"
           @click="updateMentionState"
@@ -481,24 +548,81 @@ function reasonLabel(reason) {
         <div class="ws-composer-divider"></div>
 
         <div class="ws-composer-toolbar">
-          <button
-            v-if="isGenerating"
-            class="ws-send-btn ws-send-btn--stop"
-            title="Hentikan"
-            @click="emit('stop')"
-          >
-            <Square :size="15" fill="currentColor" />
-          </button>
-          <button
-            v-else
-            class="ws-send-btn"
-            :class="{ 'ws-send-btn--active': input.trim() }"
-            :disabled="!input.trim()"
-            title="Kirim (Enter)"
-            @click="send"
-          >
-            <Send :size="15" />
-          </button>
+          <div class="ws-mode-toggle" role="tablist" aria-label="Mode AI Coding Assistant">
+            <button
+              class="ws-mode-btn"
+              :class="{ 'ws-mode-btn--active': chatMode === 'code' }"
+              role="tab"
+              :aria-selected="chatMode === 'code'"
+              title="Mode Code: AI langsung memperbaiki/menulis ulang kode yang diminta"
+              type="button"
+              @click="setChatMode('code')"
+            >
+              <Wrench :size="12" />
+              <span>Code</span>
+            </button>
+            <button
+              class="ws-mode-btn"
+              :class="{ 'ws-mode-btn--active': chatMode === 'ask' }"
+              role="tab"
+              :aria-selected="chatMode === 'ask'"
+              title="Mode Ask: AI hanya menjawab di kolom chat, tidak mengubah file apa pun"
+              type="button"
+              @click="setChatMode('ask')"
+            >
+              <CircleQuestionMark :size="12" />
+              <span>Ask</span>
+            </button>
+          </div>
+
+          <div class="ws-toolbar-right">
+            <div ref="attachWrapperRef" class="ws-attach-wrapper">
+              <button class="ws-attach-btn" title="Tambahkan file sebagai context" type="button" @click="toggleAttachMenu">
+                <Plus :size="14" />
+              </button>
+              <Transition name="fade">
+                <div v-if="showAttachMenu" class="ws-attach-menu glass">
+                  <div class="ws-attach-search">
+                    <Search :size="12" />
+                    <input v-model="attachSearch" type="text" placeholder="Cari file untuk ditambahkan sebagai context..." autofocus />
+                  </div>
+                  <div class="ws-attach-list">
+                    <p v-if="!attachMatches.length" class="ws-attach-empty">Tidak ada file yang cocok.</p>
+                    <button
+                      v-for="file in attachMatches"
+                      :key="file"
+                      class="ws-attach-item"
+                      type="button"
+                      @click="pickAttachFile(file)"
+                    >
+                      <FileCode :size="12" />
+                      <span class="ws-mention-name">{{ file.split('/').pop() }}</span>
+                      <span class="ws-mention-path">{{ file }}</span>
+                    </button>
+                  </div>
+                </div>
+              </Transition>
+            </div>
+
+            <button
+              v-if="isGenerating"
+              class="ws-send-btn ws-send-btn--stop"
+              title="Hentikan"
+              @click="emit('stop')"
+            >
+              <Square :size="15" fill="currentColor" />
+            </button>
+            <button
+              v-else
+              class="ws-send-btn"
+              :class="{ 'ws-send-btn--active': input.trim() }"
+              :disabled="!input.trim()"
+              title="Kirim (Enter)"
+              @click="send"
+            >
+              <Send :size="15" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -987,8 +1111,194 @@ function reasonLabel(reason) {
 
 .ws-composer-toolbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
   padding: 6px;
+}
+
+/* ===== Code / Ask mode toggle ===== */
+.ws-mode-toggle {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  flex-shrink: 0;
+}
+
+.ws-mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.16s ease;
+  white-space: nowrap;
+}
+
+.ws-mode-btn:hover {
+  color: var(--color-text-secondary);
+}
+
+.ws-mode-btn--active {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
+}
+
+.ws-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ===== "+" context attach picker ===== */
+.ws-attach-wrapper {
+  position: relative;
+}
+
+.ws-attach-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.ws-attach-btn:hover {
+  color: var(--color-text-accent);
+  background: var(--color-accent-subtle);
+}
+
+.ws-attach-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: 260px;
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: 9px;
+  background: var(--color-bg-tertiary);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+  z-index: 30;
+  overflow: hidden;
+}
+
+.ws-attach-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 9px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.ws-attach-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.73rem;
+}
+
+.ws-attach-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.ws-attach-empty {
+  margin: 0;
+  padding: 14px 10px;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+.ws-attach-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.73rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ws-attach-item:hover {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
+}
+
+/* ===== Pending context attachments (not yet sent) ===== */
+.ws-pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+
+.ws-pending-attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 5px 3px 8px;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  border-radius: 20px;
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
+  font-size: 0.68rem;
+  max-width: 220px;
+}
+
+.ws-pending-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-pending-attachment-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 2px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-accent);
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.ws-pending-attachment-remove:hover {
+  opacity: 1;
+  background: rgba(139, 92, 246, 0.25);
 }
 
 .ws-textarea {

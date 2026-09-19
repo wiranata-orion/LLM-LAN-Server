@@ -278,7 +278,7 @@ function emitRegenerate() {
   max-width: 600px;
   margin: 0 auto 12px;
   border-radius: 12px;
-  background: var(--color-placeholder, #e0e0e0);
+  background: var(--color-bg-tertiary);
   position: relative;
   overflow: hidden;
 }

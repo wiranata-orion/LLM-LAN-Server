@@ -493,7 +493,7 @@ window.copyCode = copyCode
   border-radius: 8px;
   margin: 12px 0;
   overflow: hidden;
-  box-shadow: 0 2px 6px var(--color-shadow);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 }
 
 .code-header {
