@@ -84,6 +84,22 @@ function dispatchEngineFallback(message: string) {
   )
 }
 
+/**
+ * Switches settings to Laptop and waits for the agent-server to actually
+ * stop targeting the broken PC Server (via syncActiveEngine) before this
+ * resolves. Awaiting this - instead of firing the retry immediately after
+ * saveSettingsToStorage - matters because memory/embedding calls on the
+ * agent-server follow that synced default, not a per-request override (see
+ * config.ts): retrying too early could have the "fallback" request still
+ * silently hit the broken PC for its memory step even though chat itself had
+ * already moved to Laptop.
+ */
+async function switchToLaptopAfterFailure(message: string): Promise<void> {
+  saveSettingsToStorage({ activeEngine: 'laptop' })
+  await syncActiveEngine()
+  dispatchEngineFallback(message)
+}
+
 async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
   const response = await fetch(`${getAgentApiUrl()}${path}`, {
     ...init,
@@ -123,8 +139,7 @@ export async function sendMessage(
   } catch (error) {
     const messageText = error instanceof Error ? error.message : 'Agent request failed'
     if (settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry && isConnectivityError(messageText)) {
-      saveSettingsToStorage({ activeEngine: 'laptop' })
-      dispatchEngineFallback('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
+      await switchToLaptopAfterFailure('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
       return sendMessage(message, history, model, signal, conversationId, true)
     }
     throw error
@@ -143,11 +158,16 @@ export async function sendMessageStream(
   isFallbackRetry = false,
 ): Promise<void> {
   const settings = getSettings()
+  // Set once the stream reader below actually exists, so a fallback
+  // triggered mid-stream (see handleEvent's 'error' branch) can explicitly
+  // close it out - "disconnect the old engine first" - before a retry to the
+  // new engine starts, instead of just abandoning it.
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined
 
   const fallbackIfEligible = async (messageText: string): Promise<boolean> => {
     if (settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry && isConnectivityError(messageText)) {
-      saveSettingsToStorage({ activeEngine: 'laptop' })
-      dispatchEngineFallback('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
+      if (activeReader) await activeReader.cancel().catch(() => {})
+      await switchToLaptopAfterFailure('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
       await sendMessageStream(message, history, model, signal, conversationId, onToken, onMeta, onMemory, true)
       return true
     }
@@ -183,6 +203,7 @@ export async function sendMessageStream(
   }
 
   const reader = response.body.getReader()
+  activeReader = reader
   const decoder = new TextDecoder()
   let buffer = ''
 
@@ -228,8 +249,44 @@ export async function uploadDocument(file: File): Promise<{ ok: boolean; documen
   })
 }
 
+/**
+ * Checks that the agent-server itself (and its SQLite-backed long-term
+ * memory) is reachable - this is what drives the "Ingatan" badge, and it
+ * deliberately does NOT depend on Ollama/the active engine being reachable:
+ * that storage works with zero Ollama dependency, and tying the badge to a
+ * LAN ping of a possibly-busy PC Server engine made it flicker "disconnected"
+ * mid-reply. The active engine's own reachability already has its own
+ * indicator (see the engine-status-pill in App.vue / getModels()).
+ * The active engine's URL is still sent so the response's `ollama` field
+ * carries it as non-blocking diagnostic info, but it never affects `ok`.
+ */
 export async function checkAgentHealth(): Promise<{ ok: boolean; error?: string }> {
-  return requestJson('/health', { method: 'GET' })
+  const ollamaBaseUrl = resolveOllamaBaseUrl(getSettings())
+  const query = ollamaBaseUrl ? `?ollamaBaseUrl=${encodeURIComponent(ollamaBaseUrl)}` : ''
+  return requestJson(`/health${query}`, { method: 'GET' })
+}
+
+/**
+ * Pushes the currently active engine (Laptop / PC Server) to the agent-server
+ * as its own default Ollama target, so work that doesn't flow through a
+ * per-request ollamaBaseUrl - Vibe Coding's background file-watcher
+ * re-indexing, document ingestion, memory embeddings - also fully follows
+ * whichever engine is selected instead of silently defaulting to whatever
+ * OLLAMA_BASE_URL the agent-server booted with. Call this on load and on
+ * every engine switch (see App.vue). Best-effort: if the agent-server isn't
+ * up yet, this just fails quietly like any other health-adjacent check.
+ */
+export async function syncActiveEngine(): Promise<void> {
+  const ollamaBaseUrl = resolveOllamaBaseUrl(getSettings())
+  if (!ollamaBaseUrl) return
+  try {
+    await requestJson('/engine/active', {
+      method: 'POST',
+      body: JSON.stringify({ ollamaBaseUrl }),
+    })
+  } catch (error) {
+    console.warn('Could not sync active engine with agent-server:', error)
+  }
 }
 
 /**
