@@ -8,6 +8,14 @@ const envSchema = z.object({
   OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434'),
   OLLAMA_CHAT_MODEL: z.string().min(1).default('llama3.2:latest'),
   OLLAMA_EMBED_MODEL: z.string().min(1).default('nomic-embed-text:latest'),
+  // Sent as "keep_alive" on every /api/chat and /api/embeddings request so
+  // Ollama doesn't unload the model back out of VRAM between turns - without
+  // this field Ollama defaults to unloading after 5m idle, and a reload from
+  // disk before the next reply can take far longer than actual generation
+  // (this is a single-user local app with nothing else competing for that
+  // VRAM by design, so there's no downside to holding it). "-1" keeps it
+  // loaded indefinitely; set to e.g. "30m" to bound it instead.
+  OLLAMA_KEEP_ALIVE: z.string().min(1).default('-1'),
   MEMORY_ROOT: z.string().min(1).default('./data'),
   VECTOR_STORE_PATH: z.string().min(1).default('./data/vector-store.json'),
   MEMORY_DB_PATH: z.string().min(1).default('./data/memory_core.sqlite'),
@@ -162,6 +170,7 @@ export const config: {
   ollamaBaseUrl: string
   chatModel: string
   embedModel: string
+  ollamaKeepAlive: string
   memoryRoot: string
   vectorStorePath: string
   memoryDbPath: string
@@ -189,6 +198,7 @@ export const config: {
   ollamaBaseUrl: parsed.OLLAMA_BASE_URL.replace(/\/$/, ''),
   chatModel: parsed.OLLAMA_CHAT_MODEL,
   embedModel: parsed.OLLAMA_EMBED_MODEL,
+  ollamaKeepAlive: parsed.OLLAMA_KEEP_ALIVE,
   memoryRoot: initialMemoryRoot,
   vectorStorePath: initialPaths.vectorStorePath,
   memoryDbPath: initialPaths.memoryDbPath,
@@ -303,6 +313,27 @@ export function resetMemoryRootToDefault(): { memoryRoot: string; vectorStorePat
     console.warn('Could not remove storage location pointer:', error)
   }
   return { memoryRoot: config.memoryRoot, vectorStorePath: config.vectorStorePath, memoryDbPath: config.memoryDbPath }
+}
+
+/**
+ * Lets the web-ui push whichever Ollama engine (Laptop / PC Server) is
+ * currently active into the agent-server's own default, so every embed()
+ * call - not just the ones that flow through a per-request /chat body field -
+ * follows it too. This matters because several embedding call sites (Vibe
+ * Coding's file-watcher re-indexing in workspace-indexer.ts, in particular)
+ * run in the background with no HTTP request to carry a per-request override
+ * on at all; a single shared default is the only thing that reaches them.
+ * Deliberately in-memory only (unlike memoryRoot/workspaceRoot) - which
+ * engine is "active" is the browser's own preference (see localStorage
+ * settings), and the web-ui re-syncs this on every load, so persisting it
+ * server-side would just be a second, potentially stale copy of the same
+ * fact.
+ */
+export function setActiveOllamaBaseUrl(url: string): { ollamaBaseUrl: string } {
+  const trimmed = url.trim().replace(/\/+$/, '')
+  if (!trimmed) throw new Error('ollamaBaseUrl tidak boleh kosong')
+  config.ollamaBaseUrl = trimmed
+  return { ollamaBaseUrl: config.ollamaBaseUrl }
 }
 
 export function getChatHistoryRootInfo(): { chatHistoryRoot: string | null; isConfigured: boolean } {
