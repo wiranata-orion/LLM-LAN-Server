@@ -28,7 +28,11 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 
 app.listen(config.port, () => {
   console.log(`Agent server listening on http://127.0.0.1:${config.port}`)
-  console.log(`Ollama endpoint: ${config.ollamaBaseUrl}`)
+  // Starting this server never itself starts/contacts Ollama - no request is
+  // made until a chat, embed, or health check actually needs one. This is
+  // just the boot default (OLLAMA_BASE_URL) and gets overwritten the moment
+  // the web-ui loads and reports its active engine - see setActiveOllamaBaseUrl.
+  console.log(`Ollama default (until web-ui syncs its active engine): ${config.ollamaBaseUrl}`)
   console.log(`Memory storage: ${config.memoryRoot}`)
 
   // Reopen (and re-watch) whichever project Vibe Coding had open last time, so

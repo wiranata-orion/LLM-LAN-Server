@@ -40,7 +40,14 @@ export interface MemorySearchResult extends MemoryRecord {
 }
 
 export interface MemoryCore {
-  appendMessage(sender: string, message: string, metadata?: Record<string, unknown>): Promise<MemoryRecord>
+  /**
+   * @param precomputedEmbedding Pass an embedding already computed for this
+   * exact `message` (e.g. the orchestrator already embedded it for retrieval)
+   * to skip embedding the same text a second time. `null` means embedding was
+   * already attempted and failed - skip storing a vector rather than retrying.
+   * Omit entirely to have this method embed `message` itself, as before.
+   */
+  appendMessage(sender: string, message: string, metadata?: Record<string, unknown>, precomputedEmbedding?: number[] | null): Promise<MemoryRecord>
   /**
    * @param queryEmbedding Pass a precomputed embedding to skip a redundant embedding call when the caller already has one.
    * @param excludeId Exclude a specific record (typically the message just appended for this same turn) from results,
@@ -242,7 +249,7 @@ export class SqliteMemoryCore implements MemoryCore {
     )
   }
 
-  async appendMessage(sender: string, message: string, metadata: Record<string, unknown> = {}): Promise<MemoryRecord> {
+  async appendMessage(sender: string, message: string, metadata: Record<string, unknown> = {}, precomputedEmbedding?: number[] | null): Promise<MemoryRecord> {
     if (!message.trim()) throw new Error('Cannot store an empty memory message')
     const sessionId = normalizeSessionId(metadata)
     const record: MemoryRecord = {
@@ -263,21 +270,37 @@ export class SqliteMemoryCore implements MemoryCore {
     this.storeFactsForSession(sessionId, extractFactsFromMessage(message))
     this.refreshRollingSummary(sessionId)
 
+    // The message is already durably saved above - making it semantically
+    // searchable (embed + vector store) is a nice-to-have for future recall,
+    // not something this call needs to make the caller wait on. Awaiting it
+    // here used to force every single reply to sit through a THIRD Ollama
+    // round trip after generation had already finished (on top of the one
+    // before generation for retrieval, and the model load for generation
+    // itself) - on an engine that has to swap the embedding model back into
+    // VRAM after the chat model, that trailing wait alone could take minutes
+    // with nothing left on screen to show for it. Runs detached instead; a
+    // vector that lands a few seconds late is still found by the next search.
+    void this.embedAndStore(record, precomputedEmbedding)
+
+    return record
+  }
+
+  private async embedAndStore(record: MemoryRecord, precomputedEmbedding?: number[] | null): Promise<void> {
     try {
-      const embedding = await embed(message)
+      const embedding = precomputedEmbedding !== undefined ? precomputedEmbedding : await embed(record.message)
+      if (!embedding) return
       const vector: VectorRecord = {
         id: record.id,
         source: `sqlite:conversations:${record.id}`,
         content: `${record.sender}: ${record.message}`,
         embedding,
-        metadata: { sender: record.sender, timestamp: record.timestamp, sessionId, ...metadata },
+        metadata: { sender: record.sender, timestamp: record.timestamp, sessionId: record.sessionId, ...record.metadata },
         createdAt: record.timestamp,
       }
       await this.vectorStore.upsert([vector])
     } catch (error) {
       console.warn(`Memory embedding skipped for ${record.id}:`, error)
     }
-    return record
   }
 
   async search(query: string, precomputedEmbedding?: number[] | null, excludeId?: string): Promise<MemorySearchResult[]> {

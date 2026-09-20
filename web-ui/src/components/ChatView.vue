@@ -94,6 +94,13 @@ function handleStop() {
   emit('stop')
 }
 
+/** Forwarded to the composer - see ChatInput.vue's restoreDraft. */
+function restoreDraft(text) {
+  chatInputRef.value?.restoreDraft(text)
+}
+
+defineExpose({ restoreDraft })
+
 const features = [
   { icon: Sparkles, title: 'Streaming Response', desc: 'Respons real-time kata per kata' },
   { icon: Cpu, title: 'Local & Private', desc: 'Berjalan di lokal tanpa internet' },

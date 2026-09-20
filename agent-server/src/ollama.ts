@@ -24,6 +24,20 @@ async function parseError(response: Response): Promise<never> {
   throw new OllamaError(`Ollama request failed (${response.status}): ${body || response.statusText}`, response.status)
 }
 
+/**
+ * Ollama's keep_alive field is a Go time.Duration under the hood: a bare
+ * integer must be sent as a JSON *number* (seconds; negative = keep loaded
+ * forever), while a JSON *string* is run through Go's duration parser, which
+ * requires a unit suffix ("1h", "30m") and rejects a plain "-1" with
+ * `time: missing unit in duration "-1"`. config.ollamaKeepAlive is a string
+ * (it comes from an env var), so plain-integer values are converted to a
+ * real number here; anything else (e.g. "1h") is passed through as-is.
+ */
+function resolveKeepAlive(value: string): number | string {
+  const trimmed = value.trim()
+  return /^-?\d+$/.test(trimmed) ? Number(trimmed) : trimmed
+}
+
 async function supportsTools(model: string, baseUrl: string): Promise<boolean> {
   const cacheKey = `${baseUrl}::${model}`
   const cached = toolSupportCache.get(cacheKey)
@@ -65,6 +79,11 @@ async function requestChat(
       ...(includeTools ? { tools } : {}),
       ...(hasOptions ? { options } : {}),
       stream,
+      // Without this, Ollama's default 5m idle timeout (or sooner, if VRAM
+      // pressure from another model forces an early evict) unloads the model
+      // between turns - the reload from disk before the next reply can take
+      // far longer than the actual generation itself. See config.ts.
+      keep_alive: resolveKeepAlive(config.ollamaKeepAlive),
     }),
     signal,
   })
@@ -80,11 +99,12 @@ async function requestChat(
   return response
 }
 
-export async function embed(text: string): Promise<number[]> {
+export async function embed(text: string, signal?: AbortSignal): Promise<number[]> {
   const response = await fetch(`${config.ollamaBaseUrl}/api/embeddings`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: config.embedModel, prompt: text }),
+    body: JSON.stringify({ model: config.embedModel, prompt: text, keep_alive: resolveKeepAlive(config.ollamaKeepAlive) }),
+    signal,
   })
   if (!response.ok) await parseError(response)
   const payload = await response.json() as OllamaGenerateEmbeddingResponse
@@ -166,8 +186,8 @@ export async function chatStream(
   }
 }
 
-export async function ping(): Promise<{ version: string }> {
-  const response = await fetch(`${config.ollamaBaseUrl}/api/version`)
+export async function ping(baseUrl: string = config.ollamaBaseUrl, signal?: AbortSignal): Promise<{ version: string }> {
+  const response = await fetch(`${baseUrl}/api/version`, { signal })
   if (!response.ok) await parseError(response)
   return await response.json() as { version: string }
 }

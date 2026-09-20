@@ -7,7 +7,7 @@ import MemoryIndicator from './components/MemoryIndicator.vue'
 import WorkspaceView from './components/WorkspaceView.vue'
 import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
 import { getModels, getSettings, saveSettingsToStorage, setModelNickname, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
-import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage, checkAgentHealth } from './services/api.ts'
+import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage, checkAgentHealth, syncActiveEngine } from './services/api.ts'
 import { resolveAutoModel } from './services/autoModel.js'
 import {
   loadStoredConversations,
@@ -25,6 +25,7 @@ const showSettings = ref(false)
 const models = ref([])
 const selectedModel = ref('')
 const isGenerating = ref(false)
+const chatViewRef = ref(null)
 const currentEngine = ref('laptop')
 const isCurrentEngineOnline = ref(null)
 
@@ -68,12 +69,19 @@ const activeMessages = computed(() => {
 function updateCurrentEngine() {
   const s = getSettings()
   currentEngine.value = s.activeEngine || 'laptop'
+  // Keep the agent-server's own default Ollama target in sync with whichever
+  // engine is active here, so background work with no per-request override
+  // (Vibe Coding re-indexing, document ingestion) fully follows it too - see
+  // syncActiveEngine() in api.ts. Fire-and-forget: it's best-effort and never
+  // throws.
+  syncActiveEngine()
 }
 
 function handleEngineFallback(e) {
   updateCurrentEngine()
   fallbackToast.value = e.detail?.message || 'Beralih ke Laptop.'
   fetchModels()
+  checkMemoryConnection()
   setTimeout(() => {
     fallbackToast.value = ''
   }, 5000)
@@ -85,9 +93,12 @@ function setAppMode(nextMode) {
   saveSettingsToStorage({ appMode: nextMode })
 }
 
-// Reachability of the agent-server that hosts "ingatan" (long-term memory /
-// RAG). Independent of the Ollama engine ping above - memory lives on the
-// agent-server regardless of which engine (Laptop/PC) is currently active.
+// Reachability of the agent-server that hosts "ingatan" (long-term memory).
+// Deliberately independent of which Ollama engine (Laptop/PC) is currently
+// active or how reachable/busy it is - that engine has its own indicator
+// (the engine-status-pill below), and SQLite-backed memory works with zero
+// Ollama dependency, so this must not flicker offline just because the PC
+// Server is slow to answer a LAN ping while it's mid-reply.
 async function checkMemoryConnection() {
   try {
     await checkAgentHealth()
@@ -320,6 +331,7 @@ function moveChatToFolder(chatId, targetFolderId) {
 // ===== Messaging =====
 
 const attachToast = ref('')
+const sendErrorToast = ref('')
 
 function stopGeneration() {
   if (abortController) {
@@ -389,8 +401,10 @@ async function sendMessage(text, files = []) {
     console.error('Conversation memory initial save failed:', error)
   })
 
-  // Generate assistant response
-  generateAssistantResponse()
+  // Generate assistant response. The raw typed text (not fullText, which may
+  // carry an attachment note prefix) is passed through so it can be handed
+  // back to the composer verbatim if this fails - see generateAssistantResponse.
+  generateAssistantResponse(text)
 }
 
 function handleRegenerate() {
@@ -425,7 +439,15 @@ function resolveModelForMessage(latestUserContent, hasAttachment) {
   return { model: model || selectedModel.value, category }
 }
 
-async function generateAssistantResponse() {
+/**
+ * @param draftToRestoreOnFailure The raw text the user just typed (see
+ * sendMessage). Only passed for a genuine new send, not a regenerate - if
+ * present and this turn fails, the failed exchange is removed from the
+ * conversation and this text is handed back to the composer so the user can
+ * retry without retyping it, instead of leaving a permanent "Error: ..."
+ * bubble in the transcript.
+ */
+async function generateAssistantResponse(draftToRestoreOnFailure) {
   const conv = activeConversation.value
   if (!conv) return
 
@@ -449,6 +471,7 @@ async function generateAssistantResponse() {
     rating: null,
   })
   const assistantIdx = conv.messages.length - 1
+  let exchangeRemovedOnFailure = false
   isGenerating.value = true
 
   const generationStartedAt = Date.now()
@@ -490,7 +513,31 @@ async function generateAssistantResponse() {
     )
   } catch (error) {
     if (!abortController.signal.aborted) {
-      conv.messages[assistantIdx].content = `Error: ${error instanceof Error ? error.message : 'Agent request failed'}`
+      const errorMessage = error instanceof Error ? error.message : 'Agent request failed'
+      if (draftToRestoreOnFailure !== undefined) {
+        // Remove the failed exchange (user message + the empty/partial
+        // assistant placeholder) rather than leaving a dead-end error bubble,
+        // and give the user their typed text back so retrying doesn't mean
+        // retyping it. This shifts every index after it, so the finally
+        // block below must not touch assistantIdx once this has run.
+        const userIdx = assistantIdx - 1
+        if (conv.messages[userIdx]?.role === 'user') {
+          conv.messages.splice(userIdx, 2)
+        } else {
+          conv.messages.splice(assistantIdx, 1)
+        }
+        // If this was a brand new conversation's very first (now-removed)
+        // message, undo the title sendMessage() optimistically set from it -
+        // otherwise the title would be stuck describing a message that no
+        // longer exists anywhere in the transcript.
+        if (conv.messages.length === 0) conv.title = ''
+        exchangeRemovedOnFailure = true
+        chatViewRef.value?.restoreDraft(draftToRestoreOnFailure)
+        sendErrorToast.value = `Gagal mendapatkan respons: ${errorMessage}`
+        setTimeout(() => { sendErrorToast.value = '' }, 6000)
+      } else {
+        conv.messages[assistantIdx].content = `Error: ${errorMessage}`
+      }
     }
   } finally {
     // Whatever happened (finished cleanly, errored, or was stopped mid-way
@@ -499,7 +546,9 @@ async function generateAssistantResponse() {
     memoryActivity.value = 'idle'
     clearInterval(generationTimerHandle)
     generationTimerHandle = null
-    conv.messages[assistantIdx].durationMs = Date.now() - generationStartedAt
+    if (!exchangeRemovedOnFailure) {
+      conv.messages[assistantIdx].durationMs = Date.now() - generationStartedAt
+    }
     isGenerating.value = false
     abortController = null
     saveConversation(conv, modelForThisMessage).catch((error) => {
@@ -557,6 +606,11 @@ function renameModel(modelName, nickname) {
 let engineToastTimer = null
 
 async function toggleEngine() {
+  // Switching engines mid-reply would change which Ollama the in-flight
+  // request/memory writes target out from under it - the button is also
+  // :disabled while isGenerating (see the template), this is just defense in
+  // depth against it being triggered some other way (e.g. a keyboard event).
+  if (isGenerating.value) return
   const nextEngine = currentEngine.value === 'pc' ? 'laptop' : 'pc'
   const s = getSettings()
 
@@ -572,6 +626,7 @@ async function toggleEngine() {
   currentEngine.value = nextEngine
   saveSettingsToStorage({ activeEngine: nextEngine })
   isCurrentEngineOnline.value = null
+  memoryConnected.value = null
 
   fallbackToast.value = `Beralih ke ${nextEngine === 'pc' ? 'PC Server' : 'Laptop'}...`
   if (engineToastTimer) clearTimeout(engineToastTimer)
@@ -579,7 +634,7 @@ async function toggleEngine() {
     fallbackToast.value = ''
   }, 3500)
 
-  await fetchModels()
+  await Promise.all([syncActiveEngine(), fetchModels(), checkMemoryConnection()])
 }
 
 // ===== Settings =====
@@ -637,7 +692,25 @@ async function loadSelectedDirectoryState() {
       })
     }
 
-    conversations.splice(0, conversations.length, ...(storedConversations || []))
+    // Never let a reload clobber a conversation that's actively streaming a
+    // reply right now (e.g. the user opened Settings mid-generation). The
+    // server's last-saved copy of it necessarily predates the in-progress
+    // assistant message - that only gets saved once generation finishes (see
+    // generateAssistantResponse's finally block) - so splicing it in would
+    // silently delete the "Thinking..."/partial-reply bubble out from under
+    // the still-running request, which then keeps mutating an orphaned
+    // object nothing on screen points to anymore. Keep the live local copy
+    // for that one conversation; everything else still reloads normally.
+    const liveConversation = isGenerating.value
+      ? conversations.find((conv) => conv.id === activeConversationId.value)
+      : null
+    const finalConversations = liveConversation
+      ? (storedConversations.some((conv) => conv.id === liveConversation.id)
+        ? storedConversations.map((conv) => (conv.id === liveConversation.id ? liveConversation : conv))
+        : [...storedConversations, liveConversation])
+      : storedConversations
+
+    conversations.splice(0, conversations.length, ...finalConversations)
     folders.splice(0, folders.length, ...(storedFolders || []))
     activeConversationId.value = conversations.some((conversation) => conversation.id === previousActiveId)
       ? previousActiveId
@@ -794,6 +867,18 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
         </div>
       </Transition>
 
+      <!-- Send Failure Toast: the prompt itself is restored to the composer
+           (see generateAssistantResponse's catch block), this just explains why. -->
+      <Transition name="slide-down">
+        <div v-if="sendErrorToast" class="fallback-toast-alert glass">
+          <AlertCircle :size="15" />
+          <span>{{ sendErrorToast }}</span>
+          <button class="toast-dismiss-btn" @click="sendErrorToast = ''">
+            <X :size="12" />
+          </button>
+        </div>
+      </Transition>
+
       <!-- Top Bar -->
       <header class="top-bar">
         <div class="top-bar-left">
@@ -817,9 +902,15 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
           />
           <button
             class="engine-status-pill"
-            :class="currentEngine === 'pc' ? 'engine-status-pill--pc' : 'engine-status-pill--laptop'"
+            :class="[
+              currentEngine === 'pc' ? 'engine-status-pill--pc' : 'engine-status-pill--laptop',
+              { 'engine-status-pill--disabled': isGenerating },
+            ]"
             @click="toggleEngine"
-            :title="`Engine aktif: ${currentEngine === 'pc' ? 'PC Server' : 'Laptop'}. Klik untuk beralih ke ${currentEngine === 'pc' ? 'Laptop' : 'PC Server'}.`"
+            :disabled="isGenerating"
+            :title="isGenerating
+              ? 'Tidak dapat beralih engine saat model sedang merespon.'
+              : `Engine aktif: ${currentEngine === 'pc' ? 'PC Server' : 'Laptop'}. Klik untuk beralih ke ${currentEngine === 'pc' ? 'Laptop' : 'PC Server'}.`"
           >
             <span
               class="engine-dot"
@@ -840,6 +931,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
            the same top bar above, so the memory + engine indicators stay put. -->
       <ChatView
         v-if="appMode === 'conversation'"
+        ref="chatViewRef"
         :messages="activeMessages"
         :is-generating="isGenerating"
         :model-name="selectedModel"
@@ -930,6 +1022,16 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
   border-color: var(--color-border-light);
 }
 
+.engine-status-pill--disabled,
+.engine-status-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  /* Blocks hover entirely instead of fighting the per-engine hover rules'
+     specificity/order below (they'd otherwise still show their colored glow
+     on hover even while disabled). */
+  pointer-events: none;
+}
+
 .engine-dot {
   width: 7px;
   height: 7px;
@@ -986,10 +1088,14 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
   box-shadow: 0 0 14px rgba(6, 182, 212, 0.35);
 }
 
+/* Online means online regardless of engine - the "online" dot always uses
+   the same green as PC Server's, so the two badges read consistently at a
+   glance. Only the pill's own idle background/border/label color (above)
+   still differs, so Laptop vs PC Server stays visually distinguishable. */
 .engine-status-pill--laptop .engine-dot--online {
-  background: #06b6d4;
-  box-shadow: 0 0 8px rgba(6, 182, 212, 0.8), 0 0 12px rgba(59, 130, 246, 0.4);
-  animation: dotPulseCyan 2.5s infinite ease-in-out;
+  background: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.8), 0 0 12px rgba(34, 197, 94, 0.4);
+  animation: dotPulseEmerald 2.5s infinite ease-in-out;
 }
 
 @keyframes dotPulseEmerald {
@@ -998,15 +1104,6 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
   }
   50% {
     box-shadow: 0 0 12px rgba(16, 185, 129, 1), 0 0 16px rgba(34, 197, 94, 0.5);
-  }
-}
-
-@keyframes dotPulseCyan {
-  0%, 100% {
-    box-shadow: 0 0 6px rgba(6, 182, 212, 0.7);
-  }
-  50% {
-    box-shadow: 0 0 12px rgba(6, 182, 212, 1), 0 0 16px rgba(59, 130, 246, 0.5);
   }
 }
 

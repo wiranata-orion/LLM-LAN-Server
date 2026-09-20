@@ -1,4 +1,3 @@
-import { checkEnginePing, getApiUrl } from './api.js'
 import {
   getChatHistoryStoragePath,
   setChatHistoryStoragePath as apiSetChatHistoryStoragePath,
@@ -8,6 +7,7 @@ import {
   deleteServerConversation,
   listServerFolders,
   saveServerFolders,
+  checkAgentHealth,
 } from './api.ts'
 
 // Chat history (conversations + folders) is mediated by the agent-server so
@@ -69,12 +69,16 @@ export async function getMemoryStatus(model) {
     return { ready: false, reason: 'model-not-selected' }
   }
 
-  const ping = await checkEnginePing(getApiUrl())
-  if (!ping.online) {
-    return { ready: false, reason: 'ollama-offline', ping }
+  // Chat history/memory lives on the agent-server, not on whichever Ollama
+  // engine (Laptop/PC) happens to be active - checking the engine here would
+  // report "offline" whenever the *other* engine is the one actually running.
+  try {
+    await checkAgentHealth()
+  } catch (error) {
+    return { ready: false, reason: 'agent-server-offline', error: error instanceof Error ? error.message : String(error) }
   }
 
-  return { ready: true, ping }
+  return { ready: true }
 }
 
 export async function loadStoredConversations(model, { requireConnection = false } = {}) {

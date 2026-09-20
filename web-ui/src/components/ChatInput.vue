@@ -100,7 +100,22 @@ function focusInput() {
   textareaRef.value?.focus()
 }
 
-defineExpose({ focusInput })
+/**
+ * Puts text back into the composer - used when a just-sent prompt fails to
+ * get a reply (error, connection lost, etc.) so the user doesn't have to
+ * retype it to retry. Only restores the typed text, not any attached files
+ * (those were already handed off to ingestAttachedFiles by the time a
+ * failure could happen further down the pipeline).
+ */
+function restoreDraft(text) {
+  input.value = text
+  nextTick(() => {
+    autoResize()
+    focusInput()
+  })
+}
+
+defineExpose({ focusInput, restoreDraft })
 </script>
 
 <template>

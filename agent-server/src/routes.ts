@@ -11,6 +11,7 @@ import {
   getChatHistoryRootInfo,
   getMemoryRootInfo,
   resetMemoryRootToDefault,
+  setActiveOllamaBaseUrl,
   setChatHistoryRoot,
   setMemoryRoot,
 } from './config.js'
@@ -48,6 +49,17 @@ const chatSchema = z.object({
   })).min(1),
 })
 
+const healthQuerySchema = z.object({
+  // Optional: also probe reachability of whichever Ollama instance is
+  // currently active (Laptop vs PC Server), reported as non-blocking extra
+  // info - see the /health handler for why this never fails the request.
+  ollamaBaseUrl: z.string().url().optional(),
+})
+
+const activeEngineSchema = z.object({
+  ollamaBaseUrl: z.string().url(),
+})
+
 const storagePathSchema = z.object({
   path: z.string().min(1),
 })
@@ -81,12 +93,41 @@ export function createRouter(context: AppContext): Router {
   // project-scoped state rather than the shared memory/vector services.
   router.use('/workspace', createWorkspaceRouter())
 
-  router.get('/health', async (_request, response) => {
+  // "ok" here means the agent-server (and its SQLite-backed long-term memory)
+  // is reachable - that storage never depends on Ollama, so this must stay
+  // true regardless of whether Ollama is installed, slow, or mid-generation
+  // on a busy PC Server. The web-ui's "Ingatan" badge is driven by this ok
+  // flag alone. Ollama reachability is reported separately, best-effort, with
+  // a short timeout - it's diagnostic info, not a reason to fail this check
+  // (a slow/unreachable engine over LAN must not flicker "Ingatan" off while
+  // it's mid-reply, which a fully-blocking ping here previously did).
+  router.get('/health', async (request, response) => {
+    const parsedQuery = healthQuerySchema.safeParse(request.query)
+    let ollama: { ok: boolean; version?: string; error?: string } = { ok: false, error: 'Invalid ollamaBaseUrl' }
+    if (parsedQuery.success) {
+      try {
+        const result = await ping(parsedQuery.data.ollamaBaseUrl, AbortSignal.timeout(4000))
+        ollama = { ok: true, version: result.version }
+      } catch (error) {
+        ollama = { ok: false, error: error instanceof Error ? error.message : 'Ollama unavailable' }
+      }
+    }
+    response.json({ ok: true, ollama })
+  })
+
+  // Lets the web-ui push whichever engine (Laptop / PC Server) it currently
+  // has active as the agent-server's own default Ollama target - see
+  // setActiveOllamaBaseUrl in config.ts for why this exists in addition to
+  // /chat's own per-request ollamaBaseUrl: background embedding work (Vibe
+  // Coding's file-watcher re-indexing, in particular) has no HTTP request to
+  // carry a per-request override on, so it can only ever follow this shared
+  // default. The web-ui calls this on load and on every engine switch.
+  router.post('/engine/active', (request, response) => {
     try {
-      const ollama = await ping()
-      response.json({ ok: true, ollama })
+      const body = activeEngineSchema.parse(request.body)
+      response.json({ ok: true, ...setActiveOllamaBaseUrl(body.ollamaBaseUrl) })
     } catch (error) {
-      response.status(503).json({ ok: false, error: error instanceof Error ? error.message : 'Ollama unavailable' })
+      response.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'Invalid ollamaBaseUrl' })
     }
   })
 

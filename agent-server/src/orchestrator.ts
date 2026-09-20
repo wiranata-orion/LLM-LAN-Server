@@ -19,6 +19,24 @@ interface PreparedContext {
   retrievedChunks: number
 }
 
+// Surfaces per-turn timing in the agent-server's own console, split into the
+// two phases that can each independently be slow for very different reasons:
+// "context/retrieval" (memory write/search + the query embedding, which is
+// where a PC Server juggling VRAM between the embedding model and the chat
+// model pays its model-swap cost) vs "generation" (the actual Ollama /api/chat
+// call). Without this split, "the PC engine is slow" gives no way to tell
+// whether the engine itself is slow to generate or whether it's stuck
+// swapping models before generation even starts.
+function logTurnTiming(phase: 'context/retrieval' | 'generation', ollamaBaseUrl: string | undefined, ms: number): void {
+  console.log(`[chat timing] ${phase} took ${(ms / 1000).toFixed(1)}s (engine: ${ollamaBaseUrl || config.ollamaBaseUrl})`)
+}
+
+// Generous enough to cover a cold model load/VRAM swap on a slow engine, but
+// still bounded: without this, a genuinely stuck embedding call (network
+// hang, not just "slow") would stall the reply indefinitely even though
+// retrieval already has a working degrade-to-keyword-search fallback below.
+const QUERY_EMBEDDING_TIMEOUT_MS = 20_000
+
 // Rough but stable enough for budgeting: mixed prose averages ~4 chars/token.
 const CHARS_PER_TOKEN = 4
 // Everything injected around the conversation (documents + recalled memory)
@@ -141,21 +159,26 @@ export class AgentOrchestrator {
   ): Promise<PreparedContext> {
     const latestUserMessage = [...input].reverse().find((message) => message.role === 'user')
 
-    let justAppendedId: string | undefined
-    if (latestUserMessage) {
-      const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-user', () =>
-        this.memory.appendMessage('user', latestUserMessage.content, { conversationId, provider: 'agent-server' }),
-      )
-      justAppendedId = appended.id
-    }
-
+    // Embedded once and reused for both storing this message's own vector
+    // (appendMessage below) and for retrieval - embedding the identical text
+    // twice would double the Ollama round trips for this turn, and on a PC
+    // Server juggling VRAM between a chat model and the embedding model,
+    // double the model-swap cost too.
     let queryEmbedding: number[] | null = null
     if (latestUserMessage) {
       try {
-        queryEmbedding = await embed(latestUserMessage.content)
+        queryEmbedding = await embed(latestUserMessage.content, AbortSignal.timeout(QUERY_EMBEDDING_TIMEOUT_MS))
       } catch (error) {
         console.warn('Query embedding failed; falling back to keyword-only retrieval:', error)
       }
+    }
+
+    let justAppendedId: string | undefined
+    if (latestUserMessage) {
+      const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-user', () =>
+        this.memory.appendMessage('user', latestUserMessage.content, { conversationId, provider: 'agent-server' }, queryEmbedding),
+      )
+      justAppendedId = appended.id
     }
 
     const [memoryResults, retrieved, memoryState] = await this.withMemoryEvent(onMemoryEvent, 'read', 'recall', () =>
@@ -231,11 +254,15 @@ export class AgentOrchestrator {
     signal?: AbortSignal,
     onMemoryEvent?: MemoryEventListener,
   ): Promise<AgentResponse> {
+    const prepareStartedAt = Date.now()
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent)
+    logTurnTiming('context/retrieval', ollamaBaseUrl, Date.now() - prepareStartedAt)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
+      const generationStartedAt = Date.now()
       const response = await chat(messages, toolDefinitions, model, options, ollamaBaseUrl, signal)
+      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt)
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
@@ -269,11 +296,15 @@ export class AgentOrchestrator {
     signal?: AbortSignal,
     onMemoryEvent?: MemoryEventListener,
   ): Promise<AgentResponse> {
+    const prepareStartedAt = Date.now()
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent)
+    logTurnTiming('context/retrieval', ollamaBaseUrl, Date.now() - prepareStartedAt)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
+      const generationStartedAt = Date.now()
       const response = await chatStream(messages, toolDefinitions, model, onToken, options, ollamaBaseUrl, signal)
+      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt)
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {

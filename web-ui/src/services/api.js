@@ -1,4 +1,8 @@
 import axios from 'axios'
+// Circular with api.ts (which imports getSettings/saveSettingsToStorage from
+// here) - safe because both sides only ever need each other's hoisted
+// function exports, never anything evaluated at module-load time.
+import { syncActiveEngine } from './api.ts'
 
 export const DEFAULT_SETTINGS = {
   // 'conversation' = ordinary chat, 'workspace' = Vibe Coding (file tree +
@@ -198,6 +202,11 @@ export async function getModels(isFallbackRetry = false) {
       console.warn('PC Server unreachable for getModels. Auto-falling back to Laptop...')
       settings.activeEngine = 'laptop'
       saveSettingsToStorage(settings)
+      // Wait for the agent-server to actually stop targeting the broken PC
+      // before retrying - its memory/embedding calls follow this synced
+      // default (see config.ts), so retrying too early could still silently
+      // hit the broken engine there even though the model list itself moved.
+      await syncActiveEngine()
       window.dispatchEvent(
         new CustomEvent('engine-fallback', {
           detail: {
