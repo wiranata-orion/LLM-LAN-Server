@@ -1,9 +1,9 @@
 <script setup>
 import { computed } from 'vue'
-import { Bot, User } from 'lucide-vue-next'
+import { Bot, User, Gauge } from 'lucide-vue-next'
 import hljs from 'highlight.js/lib/common'
 import MarkdownIt from 'markdown-it'
-import { formatDuration } from '../services/api.js'
+import { formatDuration, perfSummary, perfTooltip } from '../services/api.js'
 
 const props = defineProps({
   message: {
@@ -28,6 +28,11 @@ const isUser = computed(() => props.message.role === 'user')
 const isAssistant = computed(() => props.message.role === 'assistant')
 const isThinking = computed(() => isAssistant.value && props.isGenerating && !props.message.content)
 const elapsedLabel = computed(() => formatDuration(props.elapsedSeconds * 1000))
+// Always-visible (unlike ChatView.vue's fuller meta row, which only shows on
+// hover) - discoverability matters more here than completeness, so this is
+// just the headline number with the full breakdown in the tooltip.
+const perfLabel = computed(() => perfSummary(props.message.performance))
+const perfLabelTitle = computed(() => perfTooltip(props.message.performance))
 
 // ---- Markdown rendering ----
 // CommonMark via markdown-it (already a project dependency) instead of a
@@ -295,6 +300,15 @@ window.copyCode = copyCode
       </div>
 
       <div v-if="isUser" class="message-bubble message-bubble--user">
+        <div v-if="message.images?.length" class="message-images-row">
+          <img
+            v-for="(image, idx) in message.images"
+            :key="idx"
+            :src="`data:image/jpeg;base64,${image}`"
+            class="message-image-thumb"
+            alt="Gambar terlampir"
+          />
+        </div>
         {{ message.content }}
       </div>
 
@@ -329,6 +343,28 @@ window.copyCode = copyCode
 
 .message-row--assistant:last-child {
   border-bottom: none;
+}
+
+/* User messages sit on the right (avatar follows to the right of the
+   bubble), AI replies stay on the left - the usual messaging-app layout. */
+.message-row--user {
+  flex-direction: row-reverse;
+}
+
+.message-row--user .message-content-wrapper {
+  align-items: flex-end;
+}
+
+.message-row--user .message-role-row {
+  flex-direction: row-reverse;
+}
+
+.message-row--user .message-bubble--user {
+  text-align: right;
+}
+
+.message-row--user .message-images-row {
+  justify-content: flex-end;
 }
 
 @keyframes fadeSlideIn {
@@ -394,6 +430,16 @@ window.copyCode = copyCode
   animation: timerPulse 1.6s ease-in-out infinite;
 }
 
+.perf-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
 @keyframes timerPulse {
   0%, 100% { opacity: 0.75; }
   50% { opacity: 1; }
@@ -407,6 +453,20 @@ window.copyCode = copyCode
 .message-bubble--user {
   color: var(--color-text-primary);
   white-space: pre-wrap;
+}
+
+.message-images-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.message-image-thumb {
+  max-width: 220px;
+  max-height: 220px;
+  border-radius: 10px;
+  object-fit: cover;
 }
 
 .message-bubble--assistant {

@@ -23,6 +23,9 @@ import {
   AlertCircle,
   EllipsisVertical,
   Wand2,
+  Search,
+  XCircle,
+  Settings2,
 } from 'lucide-vue-next'
 
 import FolderItem from './FolderItem.vue'
@@ -105,6 +108,7 @@ const emit = defineEmits([
   'select-model',
   'rename-model',
   'open-settings',
+  'open-model-manager',
   'toggle-sidebar',
   'update:mode',
 ])
@@ -348,6 +352,37 @@ function handleDeleteFolder(folder, e) {
   emit('delete-folder', folder.id)
 }
 
+// ===== Conversation search =====
+// Purely client-side: conversations already carry their full message list in
+// memory (see loadStoredConversations in memory.js), so there is no need for
+// a server-side search endpoint - filtering the array already loaded for the
+// sidebar list is enough, and stays instant.
+const searchQuery = ref('')
+const isSearching = computed(() => searchQuery.value.trim().length > 0)
+
+function extractSnippet(conv, query) {
+  const match = (conv.messages || []).find((m) => typeof m.content === 'string' && m.content.toLowerCase().includes(query))
+  if (!match) return null
+  const lower = match.content.toLowerCase()
+  const idx = lower.indexOf(query)
+  const start = Math.max(0, idx - 30)
+  const end = Math.min(match.content.length, idx + query.length + 60)
+  return (start > 0 ? '…' : '') + match.content.slice(start, end).trim() + (end < match.content.length ? '…' : '')
+}
+
+const searchResults = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return []
+  return props.conversations
+    .filter((conv) => {
+      const titleMatch = getConversationTitle(conv).toLowerCase().includes(query)
+      const contentMatch = (conv.messages || []).some((m) => typeof m.content === 'string' && m.content.toLowerCase().includes(query))
+      return titleMatch || contentMatch
+    })
+    .map((conv) => ({ conv, snippet: extractSnippet(conv, query) }))
+    .sort((a, b) => new Date(b.conv.createdAt).getTime() - new Date(a.conv.createdAt).getTime())
+})
+
 const rootFolders = computed(() => {
   return props.folders.filter((f) => !f.parentId)
 })
@@ -546,7 +581,8 @@ onUnmounted(() => {
     <ModeSwitcher :mode="mode" @update:mode="$emit('update:mode', $event)" />
 
     <!-- Model Selector -->
-    <div class="model-selector-wrapper">
+    <div class="model-selector-row">
+      <div class="model-selector-wrapper">
       <button
         class="model-selector"
         :class="{ 'model-selector--disabled': autoModelEnabled }"
@@ -614,6 +650,16 @@ onUnmounted(() => {
           </div>
         </div>
       </Transition>
+      </div>
+
+      <button
+        class="model-manage-btn"
+        @click="$emit('open-model-manager')"
+        id="open-model-manager-btn"
+        title="Kelola Model (unduh/hapus model Ollama)"
+      >
+        <Settings2 :size="14" />
+      </button>
     </div>
 
     <!-- Conversation mode: chat/folder navigation. Workspace mode swaps this
@@ -642,8 +688,48 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <!-- Conversation Search -->
+    <div class="sidebar-search-box">
+      <Search :size="14" class="sidebar-search-icon" />
+      <input
+        v-model="searchQuery"
+        type="text"
+        class="sidebar-search-input"
+        placeholder="Cari percakapan..."
+        id="sidebar-search-input"
+      />
+      <button v-if="searchQuery" class="sidebar-search-clear" @click="searchQuery = ''" title="Bersihkan pencarian">
+        <XCircle :size="14" />
+      </button>
+    </div>
+
     <!-- Conversation List -->
     <div class="conversation-list">
+      <!-- Search results (flat, across all folders) - replaces the normal
+           folder/chat tree entirely while a query is active, since search
+           results don't have a meaningful folder-nesting position. -->
+      <template v-if="isSearching">
+        <div v-if="searchResults.length === 0" class="section-empty-hint">
+          <span>Tidak ada percakapan yang cocok dengan "{{ searchQuery }}"</span>
+        </div>
+        <div
+          v-for="{ conv, snippet } in searchResults"
+          :key="conv.id"
+          class="conversation-item search-result-item"
+          :class="{ 'conversation-item--active': conv.id === activeId }"
+          @click="$emit('select-chat', conv.id)"
+          role="button"
+          tabindex="0"
+        >
+          <MessageSquare :size="15" class="conv-icon" />
+          <div class="search-result-text">
+            <span class="conv-title" :title="getConversationTitle(conv)">{{ getConversationTitle(conv) }}</span>
+            <span v-if="snippet" class="search-result-snippet">{{ snippet }}</span>
+          </div>
+        </div>
+      </template>
+
+      <template v-else>
       <!-- Prominent Root Drop Banner (Visible when dragging any folder or chat) -->
       <div
         v-if="draggedItem"
@@ -863,6 +949,7 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+      </template>
     </div>
     </template>
 
@@ -1056,9 +1143,39 @@ onUnmounted(() => {
 
 
 /* Model Selector */
+.model-selector-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 12px 12px 0;
+}
+
 .model-selector-wrapper {
   position: relative;
-  margin: 12px 12px 0;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.model-manage-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.model-manage-btn:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-light);
+  background: var(--color-bg-hover);
 }
 
 .model-selector {
@@ -1400,6 +1517,72 @@ onUnmounted(() => {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin: 10px 12px 4px;
+}
+
+.sidebar-search-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 12px 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+}
+
+.sidebar-search-icon {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.sidebar-search-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--color-text-primary);
+  font-size: 0.82rem;
+  font-family: var(--font-sans);
+  min-width: 0;
+}
+
+.sidebar-search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.sidebar-search-clear {
+  display: flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.sidebar-search-clear:hover {
+  color: var(--color-text-primary);
+}
+
+.search-result-item {
+  align-items: flex-start;
+}
+
+.search-result-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.search-result-snippet {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .quick-action-btn {

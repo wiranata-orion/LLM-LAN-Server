@@ -20,6 +20,8 @@ import {
   Wand2,
   Sparkles,
   BrainCircuit,
+  FileText,
+  Trash2,
 } from 'lucide-vue-next'
 import {
   getSettings,
@@ -36,7 +38,7 @@ import {
   clearChatHistoryFolder,
 } from '../services/memory.js'
 import { TASK_CATEGORIES, getDefaultModelMap } from '../services/autoModel.js'
-import { getMemoryStoragePath, setMemoryStoragePath, resetMemoryStoragePath, getChatHistoryStoragePath } from '../services/api.ts'
+import { getMemoryStoragePath, setMemoryStoragePath, resetMemoryStoragePath, getChatHistoryStoragePath, getStorageUsage, vacuumStorage, listDocuments, deleteDocument } from '../services/api.ts'
 import ServerFolderBrowser from './ServerFolderBrowser.vue'
 
 const props = defineProps({
@@ -90,6 +92,7 @@ const customNumCtxPc = ref('')
 const temperature = ref(0.7)
 const maxTokens = ref('')
 const useContextRetrieval = ref(true)
+const customInstructions = ref('')
 
 // ===== Chat History Storage ("Folder Penyimpanan Fisik") =====
 // This only stores raw chat history (not the "real" memory system above), mediated
@@ -239,6 +242,79 @@ async function resetMemoryStoragePathToDefault() {
   }
 }
 
+// ===== Disk Usage & Vacuum =====
+const storageUsage = ref([])
+const storageUsageStatus = ref('checking') // 'checking' | 'ready' | 'offline'
+const isVacuuming = ref(false)
+
+const totalStorageBytes = computed(() => storageUsage.value.reduce((sum, entry) => sum + (entry.exists ? entry.bytes : 0), 0))
+
+function formatBytesLabel(bytes) {
+  if (!bytes) return '0 KB'
+  const kb = bytes / 1024
+  if (kb < 1024) return `${kb.toFixed(1)} KB`
+  const mb = kb / 1024
+  if (mb < 1024) return `${mb.toFixed(1)} MB`
+  return `${(mb / 1024).toFixed(2)} GB`
+}
+
+async function loadStorageUsage() {
+  storageUsageStatus.value = 'checking'
+  try {
+    const result = await getStorageUsage()
+    storageUsage.value = result.usage
+    storageUsageStatus.value = 'ready'
+  } catch (err) {
+    console.error('Failed to load storage usage:', err)
+    storageUsageStatus.value = 'offline'
+  }
+}
+
+async function runVacuum() {
+  isVacuuming.value = true
+  try {
+    await vacuumStorage()
+    showToast('Database berhasil dirapikan.')
+    await loadStorageUsage()
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : 'Gagal merapikan database.')
+  } finally {
+    isVacuuming.value = false
+  }
+}
+
+// ===== RAG Document Management =====
+const ragDocuments = ref([])
+const ragDocumentsStatus = ref('checking') // 'checking' | 'ready' | 'offline'
+const confirmingDeleteDocSource = ref('')
+const isDeletingRagDocument = ref(false)
+
+async function loadRagDocuments() {
+  ragDocumentsStatus.value = 'checking'
+  try {
+    const result = await listDocuments()
+    ragDocuments.value = result.documents || []
+    ragDocumentsStatus.value = 'ready'
+  } catch (err) {
+    console.error('Failed to load RAG documents:', err)
+    ragDocumentsStatus.value = 'offline'
+  }
+}
+
+async function confirmDeleteRagDocument(source) {
+  isDeletingRagDocument.value = true
+  try {
+    await deleteDocument(source)
+    confirmingDeleteDocSource.value = ''
+    showToast(`Dokumen "${source}" dihapus dari memori RAG.`)
+    await loadRagDocuments()
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : 'Gagal menghapus dokumen.')
+  } finally {
+    isDeletingRagDocument.value = false
+  }
+}
+
 // Ping status states (Real live check, no dummy)
 const isPinging = ref({ pc: false, laptop: false })
 const pingResult = ref({
@@ -304,6 +380,8 @@ onMounted(() => {
   }
   loadMemoryStoragePath()
   loadChatHistoryStorage()
+  loadStorageUsage()
+  loadRagDocuments()
 })
 
 onUnmounted(() => {
@@ -331,6 +409,7 @@ function loadCurrentSettings() {
   temperature.value = s.temperature !== undefined && s.temperature !== '' ? Number(s.temperature) : 0.7
   maxTokens.value = s.maxTokens ?? ''
   useContextRetrieval.value = s.useContextRetrieval !== false
+  customInstructions.value = s.customInstructions || ''
 
   autoModelEnabled.value = !!s.autoModelEnabled
   autoModelMapLaptop.value = { ...(s.autoModelMapLaptop || {}) }
@@ -628,6 +707,7 @@ function saveSettings() {
     temperature: parseFloat(temperature.value),
     maxTokens: maxTokens.value !== '' ? parseInt(maxTokens.value) : '',
     useContextRetrieval: useContextRetrieval.value,
+    customInstructions: customInstructions.value.trim(),
     autoModelEnabled: autoModelEnabled.value,
     autoModelMapLaptop: { ...autoModelMapLaptop.value },
     autoModelMapPc: { ...autoModelMapPc.value },
@@ -662,6 +742,7 @@ function resetDefaults() {
   temperature.value = DEFAULT_SETTINGS.temperature
   maxTokens.value = DEFAULT_SETTINGS.maxTokens
   useContextRetrieval.value = DEFAULT_SETTINGS.useContextRetrieval !== false
+  customInstructions.value = DEFAULT_SETTINGS.customInstructions || ''
   autoModelEnabled.value = DEFAULT_SETTINGS.autoModelEnabled || false
   autoModelMapLaptop.value = {}
   autoModelMapPc.value = {}
@@ -710,6 +791,15 @@ function resetDefaults() {
           >
             <Sliders :size="15" />
             <span>Parameter AI</span>
+          </button>
+
+          <button
+            class="tab-btn"
+            :class="{ 'tab-btn--active': activeTab === 'documents' }"
+            @click="activeTab = 'documents'"
+          >
+            <FileText :size="15" />
+            <span>Dokumen RAG</span>
           </button>
 
           <button
@@ -1172,6 +1262,71 @@ function resetDefaults() {
               />
               <p class="form-hint">Batas maksimum token balasan yang dihasilkan LLM.</p>
             </div>
+
+            <!-- Custom Instructions / Persona -->
+            <div class="form-group">
+              <label for="custom-instructions-input" class="form-label">Instruksi Tambahan / Persona</label>
+              <textarea
+                id="custom-instructions-input"
+                v-model="customInstructions"
+                class="form-input form-input--compact custom-instructions-textarea"
+                placeholder="Contoh: Selalu jawab dengan gaya santai. Kamu juga ahli masakan Indonesia."
+                rows="4"
+                maxlength="4000"
+              ></textarea>
+              <p class="form-hint">Ditambahkan setelah instruksi dasar AI (identitas &amp; aturan keamanan tetap berlaku). Kosongkan untuk perilaku default.</p>
+            </div>
+          </div>
+
+          <!-- TAB: DOKUMEN RAG -->
+          <div v-if="activeTab === 'documents'" class="tab-pane">
+            <div class="section-title-group">
+              <span class="section-title">Dokumen yang Diketahui AI (RAG)</span>
+              <span class="section-desc">Berkas yang pernah diunggah lewat menu "+" di chat, disimpan sebagai konteks yang bisa diambil AI saat relevan.</span>
+            </div>
+
+            <div class="storage-actions-row">
+              <button class="btn btn--secondary btn--compact" @click="loadRagDocuments" :disabled="ragDocumentsStatus === 'checking'">
+                <RefreshCw :size="13" />
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            <div v-if="ragDocumentsStatus === 'checking'" class="section-empty-hint">
+              Memuat daftar dokumen...
+            </div>
+            <div v-else-if="ragDocumentsStatus === 'offline'" class="section-empty-hint">
+              Agent-server tidak terhubung.
+            </div>
+            <div v-else-if="ragDocuments.length === 0" class="section-empty-hint">
+              Belum ada dokumen yang diunggah ke memori RAG.
+            </div>
+            <div v-else class="rag-document-list">
+              <div v-for="doc in ragDocuments" :key="doc.source" class="rag-document-row">
+                <div class="rag-document-info">
+                  <FileText :size="15" class="rag-document-icon" />
+                  <div class="rag-document-text">
+                    <span class="rag-document-name" :title="doc.source">{{ doc.source }}</span>
+                    <span class="rag-document-meta">{{ doc.chunks }} bagian &middot; {{ doc.characters.toLocaleString('id-ID') }} karakter</span>
+                  </div>
+                </div>
+
+                <template v-if="confirmingDeleteDocSource === doc.source">
+                  <div class="confirm-delete-row">
+                    <span class="confirm-delete-text">Hapus dokumen ini?</span>
+                    <button class="btn btn--danger btn--compact" @click="confirmDeleteRagDocument(doc.source)" :disabled="isDeletingRagDocument">
+                      {{ isDeletingRagDocument ? 'Menghapus...' : 'Ya, Hapus' }}
+                    </button>
+                    <button class="btn btn--secondary btn--compact" @click="confirmingDeleteDocSource = ''" :disabled="isDeletingRagDocument">
+                      Batal
+                    </button>
+                  </div>
+                </template>
+                <button v-else class="rag-document-delete-btn" @click="confirmingDeleteDocSource = doc.source" title="Hapus dokumen ini">
+                  <Trash2 :size="14" />
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- TAB 3: TEMA TAMPILAN -->
@@ -1358,6 +1513,56 @@ function resetDefaults() {
               @select="handleMemoryFolderSelected"
               @close="showMemoryFolderBrowser = false"
             />
+
+            <!-- Disk Usage & Vacuum -->
+            <div class="storage-box glass">
+              <div class="storage-box-header">
+                <div class="storage-icon-circle">
+                  <HardDrive :size="18" />
+                </div>
+                <div class="storage-header-text">
+                  <span class="storage-box-title">Penggunaan Disk</span>
+                  <span class="storage-box-sub">
+                    <template v-if="storageUsageStatus === 'checking'">Memeriksa ukuran database...</template>
+                    <template v-else-if="storageUsageStatus === 'offline'">Agent-server tidak terhubung.</template>
+                    <template v-else>Database yang terus bertambah di lokasi memori di atas.</template>
+                  </span>
+                </div>
+              </div>
+
+              <div v-if="storageUsageStatus === 'ready'" class="disk-usage-list">
+                <div v-for="entry in storageUsage" :key="entry.key" class="disk-usage-row">
+                  <span class="disk-usage-label">{{ entry.label }}</span>
+                  <span class="disk-usage-size" :class="{ 'disk-usage-size--empty': !entry.exists }">
+                    {{ entry.exists ? formatBytesLabel(entry.bytes) : 'Belum ada data' }}
+                  </span>
+                </div>
+                <div class="disk-usage-row disk-usage-row--total">
+                  <span class="disk-usage-label">Total</span>
+                  <span class="disk-usage-size">{{ formatBytesLabel(totalStorageBytes) }}</span>
+                </div>
+              </div>
+
+              <div class="storage-actions-row">
+                <button
+                  class="btn btn--secondary btn--compact"
+                  @click="loadStorageUsage"
+                  :disabled="storageUsageStatus !== 'ready' && storageUsageStatus !== 'checking'"
+                >
+                  <RefreshCw :size="13" />
+                  <span>Refresh</span>
+                </button>
+                <button
+                  class="btn btn--secondary btn--compact"
+                  @click="runVacuum"
+                  :disabled="storageUsageStatus !== 'ready' || isVacuuming"
+                  title="Rapikan ulang database untuk mengembalikan ruang disk yang tidak terpakai"
+                >
+                  <Sparkles :size="13" />
+                  <span>{{ isVacuuming ? 'Membersihkan...' : 'Bersihkan (VACUUM)' }}</span>
+                </button>
+              </div>
+            </div>
 
             <!-- Export / Import Buttons
             <div class="export-import-grid">
@@ -1959,6 +2164,15 @@ input:checked + .slider:before {
   font-size: 0.78rem;
 }
 
+.custom-instructions-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 80px;
+  font-family: var(--font-sans);
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+
 .form-input:focus {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px var(--color-accent-glow);
@@ -2514,6 +2728,46 @@ input:checked + .slider:before {
   gap: 8px;
 }
 
+.disk-usage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.disk-usage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 2px;
+  font-size: 0.8rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.disk-usage-row--total {
+  border-bottom: none;
+  border-top: 1px solid var(--color-border);
+  margin-top: 4px;
+  padding-top: 8px;
+  font-weight: 600;
+}
+
+.disk-usage-label {
+  color: var(--color-text-secondary);
+}
+
+.disk-usage-size {
+  font-family: var(--font-mono);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.disk-usage-size--empty {
+  color: var(--color-text-muted);
+  font-weight: 400;
+  font-style: italic;
+}
+
 .memory-path-manual {
   font-size: 0.74rem;
 }
@@ -2707,6 +2961,112 @@ input:checked + .slider:before {
 .btn--primary {
   background: var(--color-accent);
   color: var(--color-on-accent, white);
+}
+
+.btn--danger {
+  background: var(--color-danger);
+  color: white;
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.section-empty-hint {
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
+.rag-document-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rag-document-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+}
+
+.rag-document-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rag-document-icon {
+  color: var(--color-text-accent);
+  flex-shrink: 0;
+}
+
+.rag-document-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rag-document-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rag-document-meta {
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+.rag-document-delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: 6px;
+  background: none;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.rag-document-delete-btn:hover {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.confirm-delete-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.confirm-delete-text {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
 .btn--primary:hover {

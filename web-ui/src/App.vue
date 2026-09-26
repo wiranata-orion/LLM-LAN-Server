@@ -1,14 +1,17 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import MemoryIndicator from './components/MemoryIndicator.vue'
 import WorkspaceView from './components/WorkspaceView.vue'
-import { PanelLeft, Server, Laptop, AlertCircle, X } from 'lucide-vue-next'
-import { getModels, getSettings, saveSettingsToStorage, setModelNickname, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
-import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage, checkAgentHealth, syncActiveEngine } from './services/api.ts'
+import PerformanceDashboard from './components/PerformanceDashboard.vue'
+import ModelManager from './components/ModelManager.vue'
+import { PanelLeft, Server, Laptop, AlertCircle, X, Gauge } from 'lucide-vue-next'
+import { getModels, getApiUrl, getSettings, saveSettingsToStorage, setModelNickname, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
+import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage, checkAgentHealth, syncActiveEngine, checkModelSupportsVision } from './services/api.ts'
 import { resolveAutoModel } from './services/autoModel.js'
+import { resizeImagesToBase64 } from './services/image.js'
 import {
   loadStoredConversations,
   deleteConversation,
@@ -22,6 +25,8 @@ import {
 // ===== State =====
 const sidebarOpen = ref(true)
 const showSettings = ref(false)
+const showPerformanceDashboard = ref(false)
+const showModelManager = ref(false)
 const models = ref([])
 const selectedModel = ref('')
 const isGenerating = ref(false)
@@ -64,6 +69,32 @@ const activeConversation = computed(() => {
 
 const activeMessages = computed(() => {
   return activeConversation.value?.messages || []
+})
+
+// Context window usage: found from the most recent message that actually
+// carries real Ollama stats (see TurnPerformanceStats), not a heuristic
+// character count - promptEvalCount is the real tokenizer count Ollama used
+// for that turn's *entire* prompt (agent-server resends full history every
+// request, no server-side context caching), so it IS the current context
+// size. evalCount (this turn's own reply) is added in because that reply
+// becomes part of history for the *next* prompt - without it the indicator
+// would look artificially roomier than what the next turn will actually send.
+const contextUsage = computed(() => {
+  const messages = activeMessages.value
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const perf = messages[i].performance
+    if (perf?.promptEvalCount) {
+      const settings = getSettings()
+      const numCtx = Number(
+        settings.activeEngine === 'pc'
+          ? (settings.numCtxPc || settings.numCtx || 8192)
+          : (settings.numCtxLaptop || settings.numCtx || 4096),
+      )
+      const used = perf.promptEvalCount + (perf.evalCount || 0)
+      return { used, total: numCtx, percent: Math.min(100, Math.round((used / numCtx) * 100)) }
+    }
+  }
+  return null
 })
 
 function updateCurrentEngine() {
@@ -197,6 +228,40 @@ async function fetchModels() {
     selectedModel.value = ''
   }
 }
+
+// Whether the selected model declares Ollama's "vision" capability - drives
+// whether ChatInput even offers the "Upload Gambar" option, instead of the
+// user only finding out a model can't handle images after Ollama rejects the
+// request (see ollama.ts's parseError for that error message). Cached per
+// model+engine so flipping back to an already-checked model is instant.
+const modelSupportsImages = ref(false)
+const visionSupportCache = new Map()
+
+async function updateModelVisionSupport() {
+  const model = selectedModel.value
+  if (!model) {
+    modelSupportsImages.value = false
+    return
+  }
+  const baseUrl = getApiUrl()
+  const cacheKey = `${baseUrl}::${model}`
+  if (visionSupportCache.has(cacheKey)) {
+    modelSupportsImages.value = visionSupportCache.get(cacheKey)
+    return
+  }
+  try {
+    const result = await checkModelSupportsVision(model, baseUrl)
+    const supported = result.ok && result.supported
+    visionSupportCache.set(cacheKey, supported)
+    // Guard against the model having changed again while this was in flight.
+    if (selectedModel.value === model) modelSupportsImages.value = supported
+  } catch {
+    if (selectedModel.value === model) modelSupportsImages.value = false
+  }
+}
+
+watch(selectedModel, updateModelVisionSupport)
+watch(currentEngine, updateModelVisionSupport)
 
 // ===== Conversations =====
 function createNewChat(folderId = null) {
@@ -357,7 +422,7 @@ async function ingestAttachedFiles(files) {
 }
 
 // Send a user message and trigger assistant response
-async function sendMessage(text, files = []) {
+async function sendMessage(text, files = [], images = []) {
   if (isGenerating.value) return
   if (!activeConversation.value) createNewChat()
 
@@ -380,6 +445,19 @@ async function sendMessage(text, files = []) {
     }
   }
 
+  // Resized client-side (max 1024px) before ever leaving the browser - see
+  // image.js - so a full-resolution photo doesn't inflate prompt eval on an
+  // already VRAM-constrained engine.
+  let imageBase64 = []
+  if (images && images.length) {
+    try {
+      imageBase64 = await resizeImagesToBase64(images)
+    } catch (error) {
+      attachToast.value = error instanceof Error ? error.message : 'Gagal memproses gambar'
+      setTimeout(() => { attachToast.value = '' }, 5000)
+    }
+  }
+
   const attachedNote = ingestResults.filter((r) => r.ok).map((r) => `📎 ${r.file.name}`).join('\n')
   const fullText = attachedNote ? `${attachedNote}${text ? `\n\n${text}` : ''}` : text
 
@@ -388,11 +466,12 @@ async function sendMessage(text, files = []) {
     role: 'user',
     content: fullText,
     hasAttachment: ingestResults.some((r) => r.ok) || undefined,
+    images: imageBase64.length ? imageBase64 : undefined,
   })
 
   // Set title from first message
   if (!activeConversation.value.title) {
-    const titleSource = text || attachedNote
+    const titleSource = text || attachedNote || (imageBase64.length ? 'Gambar' : '')
     activeConversation.value.title = titleSource.substring(0, 50) + (titleSource.length > 50 ? '...' : '')
   }
 
@@ -451,7 +530,11 @@ async function generateAssistantResponse(draftToRestoreOnFailure) {
   const conv = activeConversation.value
   if (!conv) return
 
-  const conversationMessages = conv.messages.map(m => ({ role: m.role, content: m.content }))
+  const conversationMessages = conv.messages.map(m => ({
+    role: m.role,
+    content: m.content,
+    ...(m.images?.length ? { images: m.images } : {}),
+  }))
   const latestUserMessage = conversationMessages[conversationMessages.length - 1]
   const latestRawMessage = conv.messages[conv.messages.length - 1]
   const history = conversationMessages.slice(0, -1)
@@ -497,6 +580,7 @@ async function generateAssistantResponse(draftToRestoreOnFailure) {
       },
       (meta) => {
         if (meta.memoryId) conv.messages[assistantIdx].memoryId = meta.memoryId
+        if (meta.performance) conv.messages[assistantIdx].performance = meta.performance
       },
       (event) => {
         // Any memory event at all means the agent-server (and its memory
@@ -510,6 +594,7 @@ async function generateAssistantResponse(draftToRestoreOnFailure) {
           memoryActivity.value = event.status === 'start' ? event.phase : 'idle'
         }
       },
+      latestUserMessage?.images,
     )
   } catch (error) {
     if (!abortController.signal.aborted) {
@@ -834,6 +919,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       @select-model="selectModel"
       @rename-model="renameModel"
       @open-settings="openSettings"
+      @open-model-manager="showModelManager = true"
       @toggle-sidebar="toggleSidebar"
       :mode="appMode"
       @update:mode="setAppMode"
@@ -900,6 +986,26 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
 
         <!-- Ingatan (memory) connection + activity indicator, and Engine Indicator Badge (PC Server vs Laptop) -->
         <div class="top-bar-right">
+          <button
+            class="performance-btn"
+            @click="showPerformanceDashboard = true"
+            title="Performance Dashboard: model aktif di VRAM, riwayat kecepatan, dan status server"
+            id="performance-dashboard-btn"
+          >
+            <Gauge :size="14" />
+            <span>Performa</span>
+          </button>
+          <span
+            v-if="contextUsage"
+            class="context-usage-pill"
+            :class="{
+              'context-usage-pill--warning': contextUsage.percent >= 60 && contextUsage.percent < 85,
+              'context-usage-pill--danger': contextUsage.percent >= 85,
+            }"
+            :title="`Context window: ${contextUsage.used}/${contextUsage.total} token (${contextUsage.percent}%) terpakai. Semakin penuh, semakin besar kemungkinan pesan lama mulai dipotong.`"
+          >
+            {{ contextUsage.used }}/{{ contextUsage.total }} tok ({{ contextUsage.percent }}%)
+          </span>
           <MemoryIndicator
             :connected="memoryConnected"
             :activity="memoryActivity"
@@ -941,6 +1047,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
         :messages="activeMessages"
         :is-generating="isGenerating"
         :model-name="selectedModel"
+        :supports-images="modelSupportsImages"
         :generation-elapsed-seconds="generationElapsedSeconds"
         @send="sendMessage"
         @stop="stopGeneration"
@@ -962,6 +1069,19 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       @save="onSettingsSave"
       @folder-changed="onFolderChanged"
       @import-data="handleImportData"
+    />
+
+    <!-- Performance Dashboard -->
+    <PerformanceDashboard
+      v-if="showPerformanceDashboard"
+      @close="showPerformanceDashboard = false"
+    />
+
+    <!-- Model Manager -->
+    <ModelManager
+      v-if="showModelManager"
+      @close="showModelManager = false"
+      @models-changed="fetchModels"
     />
   </div>
 </template>
@@ -1005,6 +1125,69 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.performance-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 0.76rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.performance-btn:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-accent);
+  color: var(--color-text-accent);
+}
+
+.context-usage-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.context-usage-pill--warning {
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.context-usage-pill--danger {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--color-danger);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+@media (max-width: 640px) {
+  .context-usage-pill {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .performance-btn span {
+    display: none;
+  }
+  .performance-btn {
+    padding: 5px 8px;
+  }
 }
 
 .engine-status-pill {
