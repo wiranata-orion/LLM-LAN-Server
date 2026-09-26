@@ -1,5 +1,5 @@
 import { config } from './config.js'
-import { chat, chatStream, embed } from './ollama.js'
+import { chat, chatStream, embed, formatOllamaStats } from './ollama.js'
 import { Retriever } from './retriever.js'
 import { executeTool } from './tools/executor.js'
 // import { toolDefinitions } from './tools/registry.js'
@@ -27,15 +27,9 @@ interface PreparedContext {
 // call). Without this split, "the PC engine is slow" gives no way to tell
 // whether the engine itself is slow to generate or whether it's stuck
 // swapping models before generation even starts.
-function logTurnTiming(phase: 'context/retrieval' | 'generation', ollamaBaseUrl: string | undefined, ms: number): void {
-  console.log(`[chat timing] ${phase} took ${(ms / 1000).toFixed(1)}s (engine: ${ollamaBaseUrl || config.ollamaBaseUrl})`)
+function logTurnTiming(phase: 'context/retrieval' | 'generation', ollamaBaseUrl: string | undefined, ms: number, detail = ''): void {
+  console.log(`[chat timing] ${phase} took ${(ms / 1000).toFixed(1)}s (engine: ${ollamaBaseUrl || config.ollamaBaseUrl})${detail}`)
 }
-
-// Generous enough to cover a cold model load/VRAM swap on a slow engine, but
-// still bounded: without this, a genuinely stuck embedding call (network
-// hang, not just "slow") would stall the reply indefinitely even though
-// retrieval already has a working degrade-to-keyword-search fallback below.
-const QUERY_EMBEDDING_TIMEOUT_MS = 20_000
 
 // Rough but stable enough for budgeting: mixed prose averages ~4 chars/token.
 const CHARS_PER_TOKEN = 4
@@ -156,7 +150,26 @@ export class AgentOrchestrator {
     conversationId: string,
     numCtx?: number,
     onMemoryEvent?: MemoryEventListener,
+    useContextRetrieval = true,
+    ollamaBaseUrl?: string,
   ): Promise<PreparedContext> {
+    // RAG OFF: send the user's messages straight through, skipping the
+    // embedding call, memory/document search, and memory write below - the
+    // whole point being a faster turnaround with no workspace/memory file
+    // reads at all, not just a smaller injected context.
+    if (!useContextRetrieval) {
+      console.log('[chat timing] context/retrieval skipped (RAG OFF)')
+      const window = numCtx && numCtx > 0 ? numCtx : config.numCtxFallback
+      const historyBudget = window * (1 - RESPONSE_RESERVE_SHARE) * CHARS_PER_TOKEN - agentInstruction.length
+      return {
+        messages: [
+          { role: 'system', content: agentInstruction },
+          ...trimHistoryToBudget(input, Math.max(historyBudget, window * CHARS_PER_TOKEN * 0.25)),
+        ],
+        retrievedChunks: 0,
+      }
+    }
+
     const latestUserMessage = [...input].reverse().find((message) => message.role === 'user')
 
     // Embedded once and reused for both storing this message's own vector
@@ -167,7 +180,7 @@ export class AgentOrchestrator {
     let queryEmbedding: number[] | null = null
     if (latestUserMessage) {
       try {
-        queryEmbedding = await embed(latestUserMessage.content, AbortSignal.timeout(QUERY_EMBEDDING_TIMEOUT_MS))
+        queryEmbedding = await embed(latestUserMessage.content, AbortSignal.timeout(config.queryEmbeddingTimeoutMs), ollamaBaseUrl)
       } catch (error) {
         console.warn('Query embedding failed; falling back to keyword-only retrieval:', error)
       }
@@ -176,7 +189,7 @@ export class AgentOrchestrator {
     let justAppendedId: string | undefined
     if (latestUserMessage) {
       const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-user', () =>
-        this.memory.appendMessage('user', latestUserMessage.content, { conversationId, provider: 'agent-server' }, queryEmbedding),
+        this.memory.appendMessage('user', latestUserMessage.content, { conversationId, provider: 'agent-server' }, queryEmbedding, ollamaBaseUrl),
       )
       justAppendedId = appended.id
     }
@@ -184,10 +197,10 @@ export class AgentOrchestrator {
     const [memoryResults, retrieved, memoryState] = await this.withMemoryEvent(onMemoryEvent, 'read', 'recall', () =>
       Promise.all([
         latestUserMessage
-          ? this.memory.search(latestUserMessage.content, queryEmbedding, justAppendedId)
+          ? this.memory.search(latestUserMessage.content, queryEmbedding, justAppendedId, ollamaBaseUrl)
           : Promise.resolve([]),
         latestUserMessage
-          ? this.retriever.search(latestUserMessage.content, queryEmbedding)
+          ? this.retriever.search(latestUserMessage.content, queryEmbedding, ollamaBaseUrl)
           : Promise.resolve([]),
         this.memory.getLayerSnapshot(conversationId),
       ]),
@@ -253,21 +266,25 @@ export class AgentOrchestrator {
     ollamaBaseUrl?: string,
     signal?: AbortSignal,
     onMemoryEvent?: MemoryEventListener,
+    useContextRetrieval = true,
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
-    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent)
+    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl)
     logTurnTiming('context/retrieval', ollamaBaseUrl, Date.now() - prepareStartedAt)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
       const generationStartedAt = Date.now()
       const response = await chat(messages, toolDefinitions, model, options, ollamaBaseUrl, signal)
-      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt)
+      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt, formatOllamaStats(response))
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
+        if (!useContextRetrieval) {
+          return { message: response.message, toolRounds: round, retrievedChunks }
+        }
         const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-assistant', () =>
-          this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }),
+          this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }, undefined, ollamaBaseUrl),
         )
         return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }
@@ -295,21 +312,25 @@ export class AgentOrchestrator {
     ollamaBaseUrl?: string,
     signal?: AbortSignal,
     onMemoryEvent?: MemoryEventListener,
+    useContextRetrieval = true,
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
-    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent)
+    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl)
     logTurnTiming('context/retrieval', ollamaBaseUrl, Date.now() - prepareStartedAt)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
       const generationStartedAt = Date.now()
       const response = await chatStream(messages, toolDefinitions, model, onToken, options, ollamaBaseUrl, signal)
-      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt)
+      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt, formatOllamaStats(response))
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
+        if (!useContextRetrieval) {
+          return { message: response.message, toolRounds: round, retrievedChunks }
+        }
         const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-assistant', () =>
-          this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }),
+          this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }, undefined, ollamaBaseUrl),
         )
         return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
       }

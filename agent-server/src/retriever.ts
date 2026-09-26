@@ -11,10 +11,13 @@ export class Retriever {
    * @param queryEmbedding Pass an already-computed embedding for this exact
    * query to avoid a second redundant embedding call (the orchestrator also
    * needs it for memory search). Omit to have this method embed it itself.
+   * @param baseUrl Only consulted when queryEmbedding is omitted - the engine
+   * this chat turn is actually using, so a self-embedded call doesn't
+   * silently fall back to the shared config default instead.
    */
-  async search(query: string, queryEmbedding?: number[] | null) {
+  async search(query: string, queryEmbedding?: number[] | null, baseUrl?: string) {
     if (!query.trim()) return []
-    const embedding = queryEmbedding !== undefined ? queryEmbedding : await embed(query)
+    const embedding = queryEmbedding !== undefined ? queryEmbedding : await embed(query, undefined, baseUrl)
     if (!embedding) return []
     // This store also holds conversation-memory vectors (see memory-core.ts);
     // only ingested documents belong in "retrieved local context".

@@ -46,14 +46,19 @@ export interface MemoryCore {
    * to skip embedding the same text a second time. `null` means embedding was
    * already attempted and failed - skip storing a vector rather than retrying.
    * Omit entirely to have this method embed `message` itself, as before.
+   * @param baseUrl Only consulted when this call ends up embedding `message`
+   * itself (precomputedEmbedding omitted) - the engine this chat turn is
+   * actually using, so the embedding isn't silently attempted against the
+   * shared config default instead (see ollama.ts's embed()).
    */
-  appendMessage(sender: string, message: string, metadata?: Record<string, unknown>, precomputedEmbedding?: number[] | null): Promise<MemoryRecord>
+  appendMessage(sender: string, message: string, metadata?: Record<string, unknown>, precomputedEmbedding?: number[] | null, baseUrl?: string): Promise<MemoryRecord>
   /**
    * @param queryEmbedding Pass a precomputed embedding to skip a redundant embedding call when the caller already has one.
    * @param excludeId Exclude a specific record (typically the message just appended for this same turn) from results,
    * so the question being asked right now doesn't show up as "relevant memory" of itself.
+   * @param baseUrl Only consulted when queryEmbedding is omitted - see appendMessage.
    */
-  search(query: string, queryEmbedding?: number[] | null, excludeId?: string): Promise<MemorySearchResult[]>
+  search(query: string, queryEmbedding?: number[] | null, excludeId?: string, baseUrl?: string): Promise<MemorySearchResult[]>
   getCoreProfile(): Promise<string>
   getLayerSnapshot(sessionId: string): Promise<MemoryLayerSnapshot>
   /**
@@ -249,7 +254,7 @@ export class SqliteMemoryCore implements MemoryCore {
     )
   }
 
-  async appendMessage(sender: string, message: string, metadata: Record<string, unknown> = {}, precomputedEmbedding?: number[] | null): Promise<MemoryRecord> {
+  async appendMessage(sender: string, message: string, metadata: Record<string, unknown> = {}, precomputedEmbedding?: number[] | null, baseUrl?: string): Promise<MemoryRecord> {
     if (!message.trim()) throw new Error('Cannot store an empty memory message')
     const sessionId = normalizeSessionId(metadata)
     const record: MemoryRecord = {
@@ -280,14 +285,14 @@ export class SqliteMemoryCore implements MemoryCore {
     // VRAM after the chat model, that trailing wait alone could take minutes
     // with nothing left on screen to show for it. Runs detached instead; a
     // vector that lands a few seconds late is still found by the next search.
-    void this.embedAndStore(record, precomputedEmbedding)
+    void this.embedAndStore(record, precomputedEmbedding, baseUrl)
 
     return record
   }
 
-  private async embedAndStore(record: MemoryRecord, precomputedEmbedding?: number[] | null): Promise<void> {
+  private async embedAndStore(record: MemoryRecord, precomputedEmbedding?: number[] | null, baseUrl?: string): Promise<void> {
     try {
-      const embedding = precomputedEmbedding !== undefined ? precomputedEmbedding : await embed(record.message)
+      const embedding = precomputedEmbedding !== undefined ? precomputedEmbedding : await embed(record.message, undefined, baseUrl)
       if (!embedding) return
       const vector: VectorRecord = {
         id: record.id,
@@ -303,7 +308,7 @@ export class SqliteMemoryCore implements MemoryCore {
     }
   }
 
-  async search(query: string, precomputedEmbedding?: number[] | null, excludeId?: string): Promise<MemorySearchResult[]> {
+  async search(query: string, precomputedEmbedding?: number[] | null, excludeId?: string, baseUrl?: string): Promise<MemorySearchResult[]> {
     if (!query.trim()) return []
     const rows = (this.selectRecentForSearchStatement.all(config.memorySearchScanLimit) as Record<string, unknown>[])
       .filter((row) => !excludeId || String(row.id) !== excludeId)
@@ -313,7 +318,7 @@ export class SqliteMemoryCore implements MemoryCore {
     let queryEmbedding: number[] | null | undefined = precomputedEmbedding
     if (queryEmbedding === undefined) {
       try {
-        queryEmbedding = await embed(query)
+        queryEmbedding = await embed(query, undefined, baseUrl)
       } catch (error) {
         console.warn('Memory semantic search unavailable; using exact keyword search:', error)
         queryEmbedding = null

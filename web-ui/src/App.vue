@@ -593,6 +593,10 @@ function selectModel(modelName) {
 
 const modelNicknames = ref(getSettings().modelNicknames || {})
 const autoModelEnabled = ref(getSettings().autoModelEnabled || false)
+// Settings > Parameter AI > "Enable RAG / Context Retrieval" - drives the
+// "Ingatan Aktif" badge (see MemoryIndicator.vue), since with this off the
+// agent-server skips memory/document retrieval entirely for every turn.
+const ragEnabled = ref(getSettings().useContextRetrieval !== false)
 // The model Model Auto actually picked for the most recent message, so the
 // sidebar stays in sync with what's really running instead of a stale manual pick.
 const autoModelActiveModel = ref('')
@@ -653,6 +657,7 @@ function closeSettings() {
 async function onSettingsSave(newSettings) {
   updateCurrentEngine()
   autoModelEnabled.value = !!newSettings?.autoModelEnabled
+  ragEnabled.value = newSettings?.useContextRetrieval !== false
   if (newSettings?.theme) {
     document.documentElement.setAttribute('data-theme', newSettings.theme)
   }
@@ -899,6 +904,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
             :connected="memoryConnected"
             :activity="memoryActivity"
             :error-message="memoryErrorMessage"
+            :rag-enabled="ragEnabled"
           />
           <button
             class="engine-status-pill"

@@ -41,6 +41,9 @@ const chatSchema = z.object({
   // currently active (Laptop vs PC Server) instead of the agent-server's own fixed default.
   ollamaBaseUrl: z.string().url().optional(),
   options: chatOptionsSchema.optional(),
+  // Settings > Parameter AI > "Enable RAG / Context Retrieval". Defaults to on
+  // so older clients that never send this field keep today's behavior.
+  useContextRetrieval: z.boolean().optional(),
   messages: z.array(z.object({
     role: z.enum(['system', 'user', 'assistant', 'tool']),
     content: z.string(),
@@ -200,6 +203,7 @@ export function createRouter(context: AppContext): Router {
               if (response.writableEnded) return
               response.write(`${JSON.stringify({ type: 'memory', phase: event.phase, status: event.status, detail: event.detail })}\n`)
             },
+            body.useContextRetrieval,
           )
           response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)
@@ -224,6 +228,8 @@ export function createRouter(context: AppContext): Router {
         body.options,
         body.ollamaBaseUrl,
         upstreamAbort.signal,
+        undefined,
+        body.useContextRetrieval,
       )
       response.json({
         ok: true,

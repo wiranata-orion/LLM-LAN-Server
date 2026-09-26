@@ -133,6 +133,7 @@ export async function sendMessage(
         conversationId,
         ollamaBaseUrl: resolveOllamaBaseUrl(settings),
         options: resolveChatOptions(settings),
+        useContextRetrieval: settings.useContextRetrieval !== false,
         messages: [...history, { role: 'user', content: message }],
       }),
     })
@@ -186,6 +187,7 @@ export async function sendMessageStream(
         stream: true,
         ollamaBaseUrl: resolveOllamaBaseUrl(settings),
         options: resolveChatOptions(settings),
+        useContextRetrieval: settings.useContextRetrieval !== false,
         messages: [...history, { role: 'user', content: message }],
       }),
     })

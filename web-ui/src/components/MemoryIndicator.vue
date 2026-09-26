@@ -6,13 +6,21 @@ import { BrainCircuit } from 'lucide-vue-next'
 // false = unreachable, null = still checking on first load.
 // activity: 'idle' | 'read' | 'write' - live status of the memory subsystem
 // for the current chat turn (see orchestrator.ts's MemoryEvent stream).
+// ragEnabled: Settings > Parameter AI > "Enable RAG / Context Retrieval".
+// When off, the agent-server skips memory/document retrieval entirely for
+// every turn (see orchestrator.ts's prepareContext), so this always wins
+// over the connectivity-based states below - a connected-but-unused memory
+// store would otherwise still show as "Ingatan Aktif", which is misleading
+// about what's actually happening to the user's messages right now.
 const props = defineProps({
   connected: { type: Boolean, default: null },
   activity: { type: String, default: 'idle' },
   errorMessage: { type: String, default: '' },
+  ragEnabled: { type: Boolean, default: true },
 })
 
 const statusKey = computed(() => {
+  if (!props.ragEnabled) return 'disabled'
   if (props.connected === null) return 'checking'
   if (props.connected === false) return 'offline'
   if (props.activity === 'read') return 'reading'
@@ -21,6 +29,7 @@ const statusKey = computed(() => {
 })
 
 const label = computed(() => ({
+  disabled: 'Ingatan Nonaktif',
   checking: 'Memeriksa...',
   offline: 'Terputus',
   reading: 'Membaca...',
@@ -29,6 +38,7 @@ const label = computed(() => ({
 }[statusKey.value]))
 
 const title = computed(() => ({
+  disabled: 'RAG / Context Retrieval dimatikan di Settings > Parameter AI - balasan tidak membaca atau menulis ingatan/dokumen untuk mempercepat respons.',
   checking: 'Memeriksa koneksi ke ingatan (agent-server)...',
   offline: `Ingatan terputus - percakapan tidak dapat membaca/menulis memori jangka panjang. ${props.errorMessage ? `(${props.errorMessage})` : 'Jalankan agent-server untuk mengaktifkannya kembali.'}`,
   reading: 'Sedang membaca ingatan: mengambil fakta & percakapan relevan sebagai konteks.',
@@ -93,6 +103,16 @@ const title = computed(() => ({
   color: var(--color-text-muted);
 }
 .memory-dot--checking {
+  background: var(--color-text-muted);
+}
+
+/* Disabled: RAG turned off by the user in Settings - a deliberate, not an
+   error, state, so it's muted like "checking" rather than red like "offline". */
+.memory-status-pill--disabled {
+  color: var(--color-text-muted);
+  opacity: 0.75;
+}
+.memory-dot--disabled {
   background: var(--color-text-muted);
 }
 
