@@ -89,6 +89,7 @@ const customNumCtxPc = ref('')
 
 const temperature = ref(0.7)
 const maxTokens = ref('')
+const useContextRetrieval = ref(true)
 
 // ===== Chat History Storage ("Folder Penyimpanan Fisik") =====
 // This only stores raw chat history (not the "real" memory system above), mediated
@@ -329,6 +330,7 @@ function loadCurrentSettings() {
   else clearCustomThemeContrast()
   temperature.value = s.temperature !== undefined && s.temperature !== '' ? Number(s.temperature) : 0.7
   maxTokens.value = s.maxTokens ?? ''
+  useContextRetrieval.value = s.useContextRetrieval !== false
 
   autoModelEnabled.value = !!s.autoModelEnabled
   autoModelMapLaptop.value = { ...(s.autoModelMapLaptop || {}) }
@@ -625,6 +627,7 @@ function saveSettings() {
     numCtxPc: finalPcCtx,
     temperature: parseFloat(temperature.value),
     maxTokens: maxTokens.value !== '' ? parseInt(maxTokens.value) : '',
+    useContextRetrieval: useContextRetrieval.value,
     autoModelEnabled: autoModelEnabled.value,
     autoModelMapLaptop: { ...autoModelMapLaptop.value },
     autoModelMapPc: { ...autoModelMapPc.value },
@@ -658,6 +661,7 @@ function resetDefaults() {
   customNumCtxPc.value = ''
   temperature.value = DEFAULT_SETTINGS.temperature
   maxTokens.value = DEFAULT_SETTINGS.maxTokens
+  useContextRetrieval.value = DEFAULT_SETTINGS.useContextRetrieval !== false
   autoModelEnabled.value = DEFAULT_SETTINGS.autoModelEnabled || false
   autoModelMapLaptop.value = {}
   autoModelMapPc.value = {}
@@ -944,6 +948,21 @@ function resetDefaults() {
 
           <!-- TAB 2: PARAMETER AI (num_ctx & Temperature) -->
           <div v-if="activeTab === 'ai'" class="tab-pane">
+
+            <!-- RAG / Context Retrieval Toggle -->
+            <div class="setting-toggle-box glass">
+              <div class="toggle-info">
+                <div class="toggle-title-row">
+                  <BrainCircuit :size="15" class="toggle-icon" />
+                  <span class="toggle-title">Enable RAG / Context Retrieval</span>
+                </div>
+                <span class="form-hint">Matikan untuk respon lebih cepat (murni prompt tanpa membaca berkas memori/workspace).</span>
+              </div>
+              <label class="switch">
+                <input v-model="useContextRetrieval" type="checkbox" />
+                <span class="slider round"></span>
+              </label>
+            </div>
 
             <!-- Context Window (num_ctx) -->
             <div class="form-group context-window-card">

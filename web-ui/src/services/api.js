@@ -20,6 +20,10 @@ export const DEFAULT_SETTINGS = {
   numCtxPc: 8192,     // PC (Server)
   temperature: 0.7,
   maxTokens: '',
+  // Settings > Parameter AI > "Enable RAG / Context Retrieval". When false,
+  // the agent-server skips memory/workspace retrieval entirely for a faster,
+  // pure-prompt response.
+  useContextRetrieval: true,
   // Model Auto: when enabled, the model used per message is picked automatically
   // based on the detected task category instead of the manually selected model.
   autoModelEnabled: false,

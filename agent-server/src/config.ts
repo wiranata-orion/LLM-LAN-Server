@@ -8,14 +8,41 @@ const envSchema = z.object({
   OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434'),
   OLLAMA_CHAT_MODEL: z.string().min(1).default('llama3.2:latest'),
   OLLAMA_EMBED_MODEL: z.string().min(1).default('nomic-embed-text:latest'),
-  // Sent as "keep_alive" on every /api/chat and /api/embeddings request so
-  // Ollama doesn't unload the model back out of VRAM between turns - without
+  // Sent as "keep_alive" on every /api/chat request so Ollama doesn't unload
+  // the (usually large) chat model back out of VRAM between turns - without
   // this field Ollama defaults to unloading after 5m idle, and a reload from
-  // disk before the next reply can take far longer than actual generation
-  // (this is a single-user local app with nothing else competing for that
-  // VRAM by design, so there's no downside to holding it). "-1" keeps it
-  // loaded indefinitely; set to e.g. "30m" to bound it instead.
-  OLLAMA_KEEP_ALIVE: z.string().min(1).default('-1'),
+  // disk before the next reply can take far longer than actual generation.
+  // Defaults to "2m" rather than holding it forever: on a VRAM-constrained
+  // GPU (e.g. an 8GB card also running a vision model) never releasing the
+  // model is what leaves VRAM stuck at 100% between turns. Set to "-1" to
+  // keep it loaded indefinitely instead, or e.g. "30m" for a longer window.
+  OLLAMA_KEEP_ALIVE: z.string().min(1).default('2m'),
+  // Same idea, but for the embedding model (/api/embeddings), kept separate
+  // from OLLAMA_KEEP_ALIVE on purpose: the embedding model is tiny (tens to a
+  // few hundred MB) compared to a chat model, so there's little VRAM cost to
+  // keeping it resident far longer - and doing so avoids the chat model and
+  // embedding model repeatedly evicting each other on an 8GB-class card,
+  // which is what makes a single query embedding call take 20s+ (a full
+  // model swap) instead of the sub-second it should be once both are warm.
+  OLLAMA_EMBED_KEEP_ALIVE: z.string().min(1).default('30m'),
+  // Ceiling on how long the agent-server waits for Ollama to respond to a
+  // single /api/chat, /api/embeddings, /api/show or /api/version call -
+  // applied as both an undici headersTimeout/bodyTimeout (see ollama.ts) and
+  // the effective request budget. Needs to be generous: a heavy vision model
+  // (e.g. Qwen2.5-VL) can spend minutes on prompt eval alone on a
+  // memory-constrained GPU before the first token even appears. Raise this
+  // further if that still isn't enough for your hardware/model.
+  OLLAMA_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+  // How long orchestrator.ts's query-embedding step (used for RAG/memory
+  // retrieval, before generation even starts) waits before giving up and
+  // degrading to keyword-only search - see prepareContext(). Separate from
+  // OLLAMA_REQUEST_TIMEOUT_MS because this one gates the whole reply on
+  // something that's a nice-to-have (better retrieval), not the reply itself,
+  // so it should give up well before the main generation budget does. Needs
+  // to be generous enough to survive a genuine chat<->embed model VRAM swap
+  // on a memory-constrained GPU, though - too short and it degrades to
+  // keyword search on every single turn instead of the swap ever finishing.
+  QUERY_EMBEDDING_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
   MEMORY_ROOT: z.string().min(1).default('./data'),
   VECTOR_STORE_PATH: z.string().min(1).default('./data/vector-store.json'),
   MEMORY_DB_PATH: z.string().min(1).default('./data/memory_core.sqlite'),
@@ -171,6 +198,9 @@ export const config: {
   chatModel: string
   embedModel: string
   ollamaKeepAlive: string
+  ollamaEmbedKeepAlive: string
+  ollamaRequestTimeoutMs: number
+  queryEmbeddingTimeoutMs: number
   memoryRoot: string
   vectorStorePath: string
   memoryDbPath: string
@@ -199,6 +229,9 @@ export const config: {
   chatModel: parsed.OLLAMA_CHAT_MODEL,
   embedModel: parsed.OLLAMA_EMBED_MODEL,
   ollamaKeepAlive: parsed.OLLAMA_KEEP_ALIVE,
+  ollamaEmbedKeepAlive: parsed.OLLAMA_EMBED_KEEP_ALIVE,
+  ollamaRequestTimeoutMs: parsed.OLLAMA_REQUEST_TIMEOUT_MS,
+  queryEmbeddingTimeoutMs: parsed.QUERY_EMBEDDING_TIMEOUT_MS,
   memoryRoot: initialMemoryRoot,
   vectorStorePath: initialPaths.vectorStorePath,
   memoryDbPath: initialPaths.memoryDbPath,

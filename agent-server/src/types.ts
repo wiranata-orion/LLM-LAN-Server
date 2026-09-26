@@ -49,6 +49,16 @@ export interface VectorRecord {
 export interface OllamaChatResponse {
   message: ChatMessage
   done: boolean
+  // Only present on the final chunk (done: true) - Ollama's own breakdown of
+  // where the time actually went, in nanoseconds. Without this, "generation
+  // took 66.9s" can't be told apart from "model load took 62s, actual
+  // generation took 4.5s" - see formatOllamaStats() in ollama.ts.
+  total_duration?: number
+  load_duration?: number
+  prompt_eval_count?: number
+  prompt_eval_duration?: number
+  eval_count?: number
+  eval_duration?: number
 }
 
 export interface ChatOptions {
