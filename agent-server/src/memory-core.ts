@@ -71,6 +71,7 @@ export interface MemoryCore {
   exportJsonl(outputPath: string): Promise<void>
   importJsonl(inputPath: string): Promise<number>
   close(): void
+  vacuum(): void
 }
 
 interface MemoryFactCandidate {
@@ -436,6 +437,11 @@ export class SqliteMemoryCore implements MemoryCore {
 
   close(): void {
     this.database.close()
+  }
+
+  /** Reclaims disk space left behind by deletes/updates (WAL churn, rating clears, etc.) - see routes.ts's /storage/vacuum. */
+  vacuum(): void {
+    this.database.exec('VACUUM')
   }
 
   private storeFactsForSession(sessionId: string, facts: MemoryFactCandidate[]): void {

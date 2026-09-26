@@ -18,7 +18,12 @@ app.use(cors({
     callback(null, false)
   },
 }))
-app.use(express.json({ limit: '2mb' }))
+// 2mb was fine for text-only chat, but a /chat request can now carry base64
+// images (vision models - see ChatMessage.images) plus the full conversation
+// history resent every turn, which adds up across several image messages in
+// one conversation. This is a single-user local app behind CORS, not a public
+// API, so a generous limit costs nothing meaningful in exchange.
+app.use(express.json({ limit: '30mb' }))
 app.use('/api', createRouter(context))
 app.use((_request, response) => response.status(404).json({ ok: false, error: 'Not found' }))
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {

@@ -5,6 +5,35 @@ export interface AgentMessage {
   content: string
   name?: string
   tool_call_id?: string
+  // Base64-encoded images (no data: URI prefix), already resized client-side
+  // (see image.js) - passed straight through to Ollama's /api/chat.
+  images?: string[]
+}
+
+/**
+ * One chat turn's full performance breakdown, as computed by the
+ * agent-server (see TurnPerformanceStats in agent-server/src/types.ts) -
+ * powers the per-message stats line (ChatView.vue) and the Performance
+ * Dashboard's history/chart. The Ollama-reported fields are nanoseconds and
+ * only present once a turn actually reached a done:true response.
+ */
+export interface TurnPerformanceStats {
+  id: string
+  timestamp: string
+  conversationId: string
+  model: string
+  ollamaBaseUrl: string
+  ragEnabled: boolean
+  contextMs: number
+  generationMs: number
+  toolRounds: number
+  retrievedChunks: number
+  totalDuration?: number
+  loadDuration?: number
+  promptEvalCount?: number
+  promptEvalDuration?: number
+  evalCount?: number
+  evalDuration?: number
 }
 
 export interface AgentChatResult {
@@ -13,6 +42,7 @@ export interface AgentChatResult {
   toolRounds?: number
   retrievedChunks?: number
   memoryId?: string
+  performance?: TurnPerformanceStats
   error?: string
 }
 
@@ -22,6 +52,7 @@ export interface AgentStreamEvent {
   toolRounds?: number
   retrievedChunks?: number
   memoryId?: string
+  performance?: TurnPerformanceStats
   // Present only when type === 'memory' - see MemoryEvent in agent-server/src/types.ts.
   phase?: 'read' | 'write'
   status?: 'start' | 'end' | 'error'
@@ -121,6 +152,7 @@ export async function sendMessage(
   model?: string,
   signal?: AbortSignal,
   conversationId?: string,
+  images?: string[],
   isFallbackRetry = false,
 ): Promise<AgentChatResult> {
   const settings = getSettings()
@@ -134,14 +166,15 @@ export async function sendMessage(
         ollamaBaseUrl: resolveOllamaBaseUrl(settings),
         options: resolveChatOptions(settings),
         useContextRetrieval: settings.useContextRetrieval !== false,
-        messages: [...history, { role: 'user', content: message }],
+        customInstructions: settings.customInstructions || undefined,
+        messages: [...history, { role: 'user', content: message, ...(images?.length ? { images } : {}) }],
       }),
     })
   } catch (error) {
     const messageText = error instanceof Error ? error.message : 'Agent request failed'
     if (settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry && isConnectivityError(messageText)) {
       await switchToLaptopAfterFailure('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
-      return sendMessage(message, history, model, signal, conversationId, true)
+      return sendMessage(message, history, model, signal, conversationId, images, true)
     }
     throw error
   }
@@ -154,8 +187,9 @@ export async function sendMessageStream(
   signal: AbortSignal,
   conversationId: string,
   onToken: (content: string) => void,
-  onMeta?: (meta: { retrievedChunks?: number; memoryId?: string }) => void,
+  onMeta?: (meta: { retrievedChunks?: number; memoryId?: string; performance?: TurnPerformanceStats }) => void,
   onMemory?: (event: MemoryActivityEvent) => void,
+  images?: string[],
   isFallbackRetry = false,
 ): Promise<void> {
   const settings = getSettings()
@@ -169,7 +203,7 @@ export async function sendMessageStream(
     if (settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry && isConnectivityError(messageText)) {
       if (activeReader) await activeReader.cancel().catch(() => {})
       await switchToLaptopAfterFailure('Koneksi PC Server terputus. Mengalihkan ke Laptop.')
-      await sendMessageStream(message, history, model, signal, conversationId, onToken, onMeta, onMemory, true)
+      await sendMessageStream(message, history, model, signal, conversationId, onToken, onMeta, onMemory, images, true)
       return true
     }
     return false
@@ -188,7 +222,8 @@ export async function sendMessageStream(
         ollamaBaseUrl: resolveOllamaBaseUrl(settings),
         options: resolveChatOptions(settings),
         useContextRetrieval: settings.useContextRetrieval !== false,
-        messages: [...history, { role: 'user', content: message }],
+        customInstructions: settings.customInstructions || undefined,
+        messages: [...history, { role: 'user', content: message, ...(images?.length ? { images } : {}) }],
       }),
     })
   } catch (error) {
@@ -211,7 +246,7 @@ export async function sendMessageStream(
 
   const handleEvent = async (event: AgentStreamEvent): Promise<boolean> => {
     if (event.type === 'token' && event.content) onToken(event.content)
-    if (event.type === 'meta') onMeta?.({ retrievedChunks: event.retrievedChunks, memoryId: event.memoryId })
+    if (event.type === 'meta') onMeta?.({ retrievedChunks: event.retrievedChunks, memoryId: event.memoryId, performance: event.performance })
     if (event.type === 'memory' && event.phase && event.status) {
       onMemory?.({ phase: event.phase, status: event.status, detail: event.detail })
     }
@@ -241,14 +276,62 @@ export async function sendMessageStream(
   }
 }
 
+// PDF/DOCX/XLSX decode to garbage as text (see agent-server's ingestion.ts
+// looksBinary guard) - they need to reach the server as base64 so
+// file-extract.ts can run the right parser on the real bytes.
+const BINARY_DOCUMENT_PATTERN = /\.(pdf|docx|xlsx|xls)$/i
+
+/** Reads a File as base64 (no data: URI prefix) via the browser's own decoder, instead of a manual byte-to-base64 loop that chokes on multi-MB files. */
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve((reader.result as string).split(',')[1] || '')
+    reader.onerror = () => reject(new Error(`Gagal membaca file: ${file.name}`))
+    reader.readAsDataURL(file)
+  })
+}
+
 export async function uploadDocument(file: File): Promise<{ ok: boolean; documents: number; chunks: number }> {
-  const content = await file.text()
+  const isBinaryDocument = BINARY_DOCUMENT_PATTERN.test(file.name)
+  const content = isBinaryDocument ? await readFileAsBase64(file) : await file.text()
   return requestJson('/ingest', {
     method: 'POST',
     body: JSON.stringify({
-      documents: [{ source: file.name, content }],
+      documents: [{ source: file.name, content, ...(isBinaryDocument ? { encoding: 'base64' } : {}) }],
     }),
   })
+}
+
+// ===== RAG document management =====
+
+export interface RagDocumentSource {
+  source: string
+  chunks: number
+  characters: number
+}
+
+export async function listDocuments(): Promise<{ ok: boolean; documents: RagDocumentSource[] }> {
+  return requestJson('/documents', { method: 'GET' })
+}
+
+export async function deleteDocument(source: string): Promise<{ ok: boolean; removed: number }> {
+  return requestJson(`/documents/${encodeURIComponent(source)}`, { method: 'DELETE' })
+}
+
+// ===== Tool-calling support check =====
+
+export async function checkModelSupportsTools(model: string, ollamaBaseUrl?: string): Promise<{ ok: boolean; supported: boolean; error?: string }> {
+  const params = new URLSearchParams({ model })
+  if (ollamaBaseUrl) params.set('ollamaBaseUrl', ollamaBaseUrl)
+  return requestJson(`/models/supports-tools?${params.toString()}`, { method: 'GET' })
+}
+
+// ===== Vision (image input) support check =====
+
+export async function checkModelSupportsVision(model: string, ollamaBaseUrl?: string): Promise<{ ok: boolean; supported: boolean; error?: string }> {
+  const params = new URLSearchParams({ model })
+  if (ollamaBaseUrl) params.set('ollamaBaseUrl', ollamaBaseUrl)
+  return requestJson(`/models/supports-vision?${params.toString()}`, { method: 'GET' })
 }
 
 /**
@@ -262,7 +345,13 @@ export async function uploadDocument(file: File): Promise<{ ok: boolean; documen
  * The active engine's URL is still sent so the response's `ollama` field
  * carries it as non-blocking diagnostic info, but it never affects `ok`.
  */
-export async function checkAgentHealth(): Promise<{ ok: boolean; error?: string }> {
+export async function checkAgentHealth(): Promise<{
+  ok: boolean
+  error?: string
+  // Reachability/version of the active engine specifically - non-blocking
+  // diagnostic info, never a reason `ok` itself is false (see routes.ts).
+  ollama?: { ok: boolean; version?: string; error?: string }
+}> {
   const ollamaBaseUrl = resolveOllamaBaseUrl(getSettings())
   const query = ollamaBaseUrl ? `?ollamaBaseUrl=${encodeURIComponent(ollamaBaseUrl)}` : ''
   return requestJson(`/health${query}`, { method: 'GET' })
@@ -455,4 +544,123 @@ export async function saveServerGlobalMemory(memory: {
     method: 'PUT',
     body: JSON.stringify(memory),
   })
+}
+
+// ===== Performance Dashboard =====
+
+/** One model Ollama's GET /api/ps reports as currently resident in VRAM. */
+export interface OllamaRunningModel {
+  name: string
+  model: string
+  size: number
+  size_vram: number
+  digest: string
+  expires_at: string
+  details?: {
+    family?: string
+    parameter_size?: string
+    quantization_level?: string
+    [key: string]: unknown
+  }
+}
+
+/** History of past turns' timing breakdown, for the dashboard's trend chart. */
+export async function getPerformanceHistory(limit = 50): Promise<{ ok: boolean; history: TurnPerformanceStats[] }> {
+  return requestJson(`/performance/history?limit=${encodeURIComponent(String(limit))}`, { method: 'GET' })
+}
+
+/**
+ * Models currently loaded in VRAM on the given engine. Never throws on an
+ * unreachable engine - see the endpoint's own comment in routes.ts - so the
+ * dashboard can show "engine tidak terjangkau" instead of an error boundary.
+ */
+export async function getRunningModels(ollamaBaseUrl?: string): Promise<{ ok: boolean; models: OllamaRunningModel[]; error?: string }> {
+  const query = ollamaBaseUrl ? `?ollamaBaseUrl=${encodeURIComponent(ollamaBaseUrl)}` : ''
+  return requestJson(`/performance/running-models${query}`, { method: 'GET' })
+}
+
+// ===== Disk usage (Settings > Penyimpanan) =====
+
+export interface StorageUsageEntry {
+  key: string
+  label: string
+  path: string
+  bytes: number
+  exists: boolean
+}
+
+export async function getStorageUsage(): Promise<{ ok: boolean; usage: StorageUsageEntry[]; memoryRoot: string }> {
+  return requestJson('/storage/usage', { method: 'GET' })
+}
+
+/** Runs SQLite VACUUM on the memory/vector/performance databases to reclaim disk space. */
+export async function vacuumStorage(): Promise<{ ok: boolean; error?: string }> {
+  return requestJson('/storage/vacuum', { method: 'POST' })
+}
+
+// ===== Model Management (pull / delete) =====
+// Installed models with sizes come from getModels() in api.js (Ollama's own
+// GET /api/tags, called directly, not through the agent-server) - these two
+// only cover the mutating operations, routed through the agent-server to
+// reuse its timeout/error-handling for what can be a very long download.
+
+export interface OllamaPullProgress {
+  status: string
+  digest?: string
+  total?: number
+  completed?: number
+  error?: string
+}
+
+/**
+ * Streams Ollama's own pull progress (status text, and byte counts once a
+ * layer download starts) via onProgress. Resolves once the pull finishes;
+ * rejects with a clear message on failure (bad model name, disk full, engine
+ * unreachable, etc.) - see ollama.ts's pullModel for what can throw.
+ */
+export async function pullModel(
+  model: string,
+  ollamaBaseUrl: string | undefined,
+  onProgress: (progress: OllamaPullProgress) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${getAgentApiUrl()}/models/pull`, {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
+    body: JSON.stringify({ model, ollamaBaseUrl }),
+  })
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(payload.error || `Agent server error ${response.status}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const handleLine = (line: string) => {
+    const progress = JSON.parse(line) as OllamaPullProgress
+    if (progress.status === 'error' || progress.error) throw new Error(progress.error || 'Gagal mengunduh model')
+    if (progress.status !== 'done') onProgress(progress)
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      if (line.trim()) handleLine(line)
+    }
+  }
+  if (buffer.trim()) handleLine(buffer)
+}
+
+export async function deleteModel(model: string, ollamaBaseUrl?: string): Promise<{ ok: boolean; error?: string }> {
+  const query = ollamaBaseUrl
+    ? `?model=${encodeURIComponent(model)}&ollamaBaseUrl=${encodeURIComponent(ollamaBaseUrl)}`
+    : `?model=${encodeURIComponent(model)}`
+  return requestJson(`/models${query}`, { method: 'DELETE' })
 }
