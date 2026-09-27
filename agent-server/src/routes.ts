@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import express from 'express'
-import { rm, writeFile } from 'node:fs/promises'
+import { rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import type { AppContext } from './app-context.js'
@@ -16,14 +16,47 @@ import {
   setMemoryRoot,
 } from './config.js'
 import { browseDirectory } from './fs-browser.js'
-import { ping } from './ollama.js'
+import { deleteModel, listRunningModels, ping, pullModel, supportsTools, supportsVision } from './ollama.js'
 import { createWorkspaceRouter } from './routes/workspace.js'
 import type { ChatMessage } from './types.js'
+
+const performanceQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(500).optional(),
+})
+
+const runningModelsQuerySchema = z.object({
+  ollamaBaseUrl: z.string().url().optional(),
+})
+
+const pullModelSchema = z.object({
+  model: z.string().min(1),
+  ollamaBaseUrl: z.string().url().optional(),
+})
+
+const deleteModelQuerySchema = z.object({
+  model: z.string().min(1),
+  ollamaBaseUrl: z.string().url().optional(),
+})
+
+const supportsToolsQuerySchema = z.object({
+  model: z.string().min(1),
+  ollamaBaseUrl: z.string().url().optional(),
+})
+
+const supportsVisionQuerySchema = z.object({
+  model: z.string().min(1),
+  ollamaBaseUrl: z.string().url().optional(),
+})
 
 const documentSchema = z.object({
   id: z.string().optional(),
   source: z.string().min(1),
   content: z.string().min(1),
+  // 'base64' means `content` is a base64-encoded binary file (PDF/DOCX/XLSX -
+  // see file-extract.ts) that still needs text extraction before it can be
+  // chunked/embedded. Defaults to 'utf8' for plain-text documents, unchanged
+  // from before this field existed.
+  encoding: z.enum(['utf8', 'base64']).optional(),
   metadata: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
 })
 
@@ -44,11 +77,17 @@ const chatSchema = z.object({
   // Settings > Parameter AI > "Enable RAG / Context Retrieval". Defaults to on
   // so older clients that never send this field keep today's behavior.
   useContextRetrieval: z.boolean().optional(),
+  // Settings > Parameter AI > "Instruksi Tambahan / Persona" - appended after
+  // the base agentInstruction (see orchestrator.ts), not a replacement for
+  // it, so the identity/safety rules there always still apply.
+  customInstructions: z.string().max(4000).optional(),
   messages: z.array(z.object({
     role: z.enum(['system', 'user', 'assistant', 'tool']),
     content: z.string(),
     name: z.string().optional(),
     tool_call_id: z.string().optional(),
+    // Base64-encoded images (no data: URI prefix) for vision models - see ChatMessage.images.
+    images: z.array(z.string()).optional(),
   })).min(1),
 })
 
@@ -116,6 +155,116 @@ export function createRouter(context: AppContext): Router {
       }
     }
     response.json({ ok: true, ollama })
+  })
+
+  // Performance Dashboard (see web-ui's PerformanceDashboard.vue) - history of
+  // past turns' timing breakdown, persisted by orchestrator.ts via
+  // performance-store.ts. Purely diagnostic, so a failure here never means the
+  // dashboard can't show anything else (running models / server status still
+  // work independently).
+  router.get('/performance/history', (request, response) => {
+    try {
+      const query = performanceQuerySchema.parse(request.query)
+      response.json({ ok: true, history: context.current.performanceStore.listRecent(query.limit ?? 50) })
+    } catch (error) {
+      response.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'Failed to load performance history' })
+    }
+  })
+
+  // What's actually resident in VRAM right now on the given engine (Ollama's
+  // own GET /api/ps) - the direct way to see whether the chat model and
+  // embedding model are coexisting or evicting each other, instead of
+  // inferring it indirectly from how long a turn took.
+  router.get('/performance/running-models', async (request, response) => {
+    try {
+      const query = runningModelsQuerySchema.parse(request.query)
+      const models = await listRunningModels(query.ollamaBaseUrl, AbortSignal.timeout(10_000))
+      response.json({ ok: true, models })
+    } catch (error) {
+      response.status(200).json({ ok: false, models: [], error: error instanceof Error ? error.message : 'Failed to list running models' })
+    }
+  })
+
+  // ===== Model Management (pull / delete) =====
+  // Installed models WITH sizes are already available to the web-ui directly
+  // from Ollama's own GET /api/tags (see getModels() in api.js) - no need to
+  // duplicate that here. Only the two mutating operations go through the
+  // agent-server, to reuse its timeout/keep-alive/error-handling plumbing
+  // (see ollama.ts) for what can be a very long-running download.
+  router.post('/models/pull', async (request, response) => {
+    const upstreamAbort = new AbortController()
+    response.on('close', () => {
+      if (!response.writableEnded) upstreamAbort.abort()
+    })
+    try {
+      const body = pullModelSchema.parse(request.body)
+      response.status(200)
+      response.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
+      response.setHeader('Cache-Control', 'no-cache, no-transform')
+      response.setHeader('Connection', 'keep-alive')
+      response.flushHeaders()
+      try {
+        await pullModel(
+          body.model,
+          (progress) => {
+            if (response.writableEnded) return
+            response.write(`${JSON.stringify(progress)}\n`)
+          },
+          body.ollamaBaseUrl,
+          upstreamAbort.signal,
+        )
+        response.write(`${JSON.stringify({ status: 'done' })}\n`)
+        response.end()
+      } catch (error) {
+        if (response.writableEnded || upstreamAbort.signal.aborted) return
+        const message = error instanceof Error ? error.message : 'Gagal mengunduh model'
+        response.write(`${JSON.stringify({ status: 'error', error: message })}\n`)
+        response.end()
+      }
+    } catch (error) {
+      response.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'Invalid pull request' })
+    }
+  })
+
+  router.delete('/models', async (request, response) => {
+    try {
+      const query = deleteModelQuerySchema.parse(request.query)
+      await deleteModel(query.model, query.ollamaBaseUrl)
+      response.json({ ok: true })
+    } catch (error) {
+      response.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'Gagal menghapus model' })
+    }
+  })
+
+  // Whether a given model declares Ollama's "tools" capability - lets the
+  // web-ui show this per model (see ModelManager.vue) instead of tool support
+  // only ever showing up as a silent fallback deep in a chat request. Modeled
+  // on /performance/running-models: a 200 with ok:false rather than a hard
+  // error, since "can't tell yet" (engine unreachable) is a display state,
+  // not a request failure.
+  router.get('/models/supports-tools', async (request, response) => {
+    try {
+      const query = supportsToolsQuerySchema.parse(request.query)
+      const supported = await supportsTools(query.model, query.ollamaBaseUrl || config.ollamaBaseUrl)
+      response.json({ ok: true, supported })
+    } catch (error) {
+      response.status(200).json({ ok: false, supported: false, error: error instanceof Error ? error.message : 'Failed to check tool support' })
+    }
+  })
+
+  // Whether a given model declares Ollama's "vision" capability - lets the
+  // web-ui show/hide the image-attach button in the composer per model
+  // (see ChatInput.vue), instead of the user only discovering it doesn't
+  // support images after Ollama rejects the request. Same shape/behavior as
+  // /models/supports-tools above.
+  router.get('/models/supports-vision', async (request, response) => {
+    try {
+      const query = supportsVisionQuerySchema.parse(request.query)
+      const supported = await supportsVision(query.model, query.ollamaBaseUrl || config.ollamaBaseUrl)
+      response.json({ ok: true, supported })
+    } catch (error) {
+      response.status(200).json({ ok: false, supported: false, error: error instanceof Error ? error.message : 'Failed to check vision support' })
+    }
   })
 
   // Lets the web-ui push whichever engine (Laptop / PC Server) it currently
@@ -204,8 +353,9 @@ export function createRouter(context: AppContext): Router {
               response.write(`${JSON.stringify({ type: 'memory', phase: event.phase, status: event.status, detail: event.detail })}\n`)
             },
             body.useContextRetrieval,
+            body.customInstructions,
           )
-          response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId })}\n`)
+          response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId, performance: result.performance })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)
           response.end()
           return
@@ -230,6 +380,7 @@ export function createRouter(context: AppContext): Router {
         upstreamAbort.signal,
         undefined,
         body.useContextRetrieval,
+        body.customInstructions,
       )
       response.json({
         ok: true,
@@ -237,6 +388,7 @@ export function createRouter(context: AppContext): Router {
         toolRounds: result.toolRounds,
         retrievedChunks: result.retrievedChunks,
         memoryId: result.memoryId,
+        performance: result.performance,
       })
     } catch (error) {
       if (response.writableEnded || upstreamAbort.signal.aborted) return
@@ -321,6 +473,43 @@ export function createRouter(context: AppContext): Router {
       response.json({ ok: true, ...result, ...getMemoryRootInfo() })
     } catch (error) {
       response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Failed to reset storage path' })
+    }
+  })
+
+  // Disk usage of the SQLite files that grow over time (Settings > Penyimpanan)
+  // - most relevant when memoryRoot sits inside a synced folder (OneDrive,
+  // Dropbox, etc.), where an ever-growing WAL file means an ever-busy sync
+  // client. `exists: false` for a store that hasn't written anything yet is
+  // normal, not an error.
+  router.get('/storage/usage', async (_request, response) => {
+    const targets = [
+      { key: 'memory', label: 'Memori & Riwayat Chat', path: config.memoryDbPath },
+      { key: 'vectors', label: 'Vector Store (RAG/Embedding)', path: config.vectorStorePath.replace(/\.json$/i, '.sqlite') },
+      { key: 'performance', label: 'Riwayat Performa', path: config.performanceDbPath },
+    ]
+    const usage = await Promise.all(targets.map(async (target) => {
+      try {
+        const info = await stat(target.path)
+        return { key: target.key, label: target.label, path: target.path, bytes: info.size, exists: true }
+      } catch {
+        return { key: target.key, label: target.label, path: target.path, bytes: 0, exists: false }
+      }
+    }))
+    response.json({ ok: true, usage, memoryRoot: config.memoryRoot })
+  })
+
+  // Reclaims space SQLite leaves behind after deletes/updates (WAL churn,
+  // cleared ratings, the performance store's 30-day prune, etc.) - the file
+  // shrinking on disk is the whole point for someone worried about OneDrive
+  // sync load, so this runs synchronously and only responds once it's done.
+  router.post('/storage/vacuum', (_request, response) => {
+    try {
+      context.current.memory.vacuum()
+      context.current.store.vacuum()
+      context.current.performanceStore.vacuum()
+      response.json({ ok: true })
+    } catch (error) {
+      response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Failed to vacuum storage' })
     }
   })
 

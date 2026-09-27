@@ -24,6 +24,10 @@ export const DEFAULT_SETTINGS = {
   // the agent-server skips memory/workspace retrieval entirely for a faster,
   // pure-prompt response.
   useContextRetrieval: true,
+  // Settings > Parameter AI > "Instruksi Tambahan / Persona" - appended after
+  // the base agent instruction on the server (see orchestrator.ts), not a
+  // replacement for it, so identity/safety rules always still apply.
+  customInstructions: '',
   // Model Auto: when enabled, the model used per message is picked automatically
   // based on the detected task category instead of the manually selected model.
   autoModelEnabled: false,
@@ -81,6 +85,35 @@ export function setModelNickname(modelName, nickname) {
 export function getModelDisplayName(modelName) {
   const settings = getSettings()
   return (settings.modelNicknames && settings.modelNicknames[modelName]) || modelName
+}
+
+// ---- Per-message performance formatting (see TurnPerformanceStats) ----
+// Shared between MessageBubble.vue (always-visible indicator) and
+// ChatView.vue (hover meta row) so the numbers/wording never drift apart.
+
+/** The single most useful at-a-glance number: generation speed. Null when no real Ollama stats exist yet (e.g. an errored turn). */
+export function perfSummary(perf) {
+  if (!perf?.evalCount || !perf?.evalDuration) return null
+  const tokPerSec = perf.evalCount / (perf.evalDuration / 1e9)
+  return `${tokPerSec.toFixed(1)} tok/s`
+}
+
+/** Full breakdown for a tooltip: model load, prompt eval, generation, and whether RAG was on for this turn. */
+export function perfTooltip(perf) {
+  if (!perf) return ''
+  const parts = []
+  if (perf.loadDuration && perf.loadDuration / 1e9 >= 0.1) {
+    parts.push(`Model load: ${(perf.loadDuration / 1e9).toFixed(1)}s`)
+  }
+  if (perf.promptEvalDuration) {
+    parts.push(`Prompt eval: ${(perf.promptEvalDuration / 1e9).toFixed(1)}s (${perf.promptEvalCount ?? '?'} tok)`)
+  }
+  if (perf.evalDuration) {
+    const tokPerSec = perf.evalCount && perf.evalDuration > 0 ? (perf.evalCount / (perf.evalDuration / 1e9)).toFixed(1) : '?'
+    parts.push(`Generation: ${(perf.evalDuration / 1e9).toFixed(1)}s (${perf.evalCount ?? '?'} tok, ~${tokPerSec} tok/s)`)
+  }
+  if (!perf.ragEnabled) parts.push('RAG dimatikan untuk pesan ini')
+  return parts.join('\n')
 }
 
 /** Formats a duration in milliseconds as "3.2s" or "1m 05s", used for the live
@@ -192,17 +225,25 @@ export async function checkEnginePing(url) {
 }
 
 /**
- * Fetch available models from the active Ollama engine
+ * Fetch available models from an Ollama engine.
+ * @param {string} [explicitUrl] Query this exact engine instead of whichever
+ * is currently active - e.g. the Performance Dashboard / Model Manager
+ * checking "the other" engine without switching the app's active one.
+ * Auto-fallback (on failure, flip the active engine to Laptop) only makes
+ * sense when the caller actually wanted "the active engine" and didn't get
+ * to choose which one - it's skipped here, since silently flipping the
+ * user's active engine just because they peeked at the PC Server's model
+ * list would be a surprising side effect of an explicit, unrelated check.
  */
-export async function getModels(isFallbackRetry = false) {
+export async function getModels(explicitUrl, isFallbackRetry = false) {
   const settings = getSettings()
-  const url = getApiUrl()
+  const url = explicitUrl || getApiUrl()
   try {
     const res = await axios.get(`${url}/api/tags`, { timeout: 3500 })
     return res.data.models || []
   } catch (err) {
     console.error(`Failed to fetch models from ${url}:`, err)
-    if (settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry) {
+    if (!explicitUrl && settings.activeEngine === 'pc' && settings.autoFallback !== false && !isFallbackRetry) {
       console.warn('PC Server unreachable for getModels. Auto-falling back to Laptop...')
       settings.activeEngine = 'laptop'
       saveSettingsToStorage(settings)
@@ -220,7 +261,7 @@ export async function getModels(isFallbackRetry = false) {
           },
         })
       )
-      return getModels(true)
+      return getModels(undefined, true)
     }
     return []
   }

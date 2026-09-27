@@ -207,6 +207,11 @@ export class VectorStore {
   close(): void {
     this.database.close()
   }
+
+  /** Reclaims disk space left behind by deletes/updates - see routes.ts's /storage/vacuum. */
+  vacuum(): void {
+    this.database.exec('VACUUM')
+  }
 }
 
 /** Records whose id/source marks them as conversation memory, not an ingested document. */

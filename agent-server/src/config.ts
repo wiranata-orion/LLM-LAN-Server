@@ -103,11 +103,13 @@ const storagePointerPath = path.resolve(projectRoot, 'data', '.storage-location.
 const defaultMemoryRoot = path.resolve(projectRoot, parsed.MEMORY_ROOT)
 const defaultVectorStorePath = path.resolve(projectRoot, parsed.VECTOR_STORE_PATH)
 const defaultMemoryDbPath = path.resolve(projectRoot, parsed.MEMORY_DB_PATH)
+const defaultPerformanceDbPath = path.join(defaultMemoryRoot, 'performance.sqlite')
 
 function derivePathsForRoot(memoryRoot: string) {
   return {
     vectorStorePath: path.join(memoryRoot, 'vector-store.json'),
     memoryDbPath: path.join(memoryRoot, 'memory_core.sqlite'),
+    performanceDbPath: path.join(memoryRoot, 'performance.sqlite'),
   }
 }
 
@@ -134,7 +136,7 @@ const initialPointer = readStoragePointer()
 const initialMemoryRoot = initialPointer?.memoryRoot ?? defaultMemoryRoot
 const initialPaths = initialPointer
   ? derivePathsForRoot(initialPointer.memoryRoot)
-  : { vectorStorePath: defaultVectorStorePath, memoryDbPath: defaultMemoryDbPath }
+  : { vectorStorePath: defaultVectorStorePath, memoryDbPath: defaultMemoryDbPath, performanceDbPath: defaultPerformanceDbPath }
 
 // ===== Chat history storage (Settings > Memory > "Folder Penyimpanan Fisik") =====
 // Unlike memoryRoot, this has no built-in default folder: unset means the web-ui
@@ -204,6 +206,7 @@ export const config: {
   memoryRoot: string
   vectorStorePath: string
   memoryDbPath: string
+  performanceDbPath: string
   maxRetrievedChunks: number
   memorySummaryThreshold: number
   memoryFactLimit: number
@@ -235,6 +238,7 @@ export const config: {
   memoryRoot: initialMemoryRoot,
   vectorStorePath: initialPaths.vectorStorePath,
   memoryDbPath: initialPaths.memoryDbPath,
+  performanceDbPath: initialPaths.performanceDbPath,
   maxRetrievedChunks: parsed.MAX_RETRIEVED_CHUNKS,
   memorySummaryThreshold: parsed.MEMORY_SUMMARY_THRESHOLD,
   memoryFactLimit: parsed.MEMORY_FACT_LIMIT,
@@ -315,7 +319,7 @@ function assertWritable(directory: string): void {
  * folder - e.g. a flashdisk shared between the Laptop and PC Server - and
  * remember the choice so it keeps applying on the next server start.
  */
-export function setMemoryRoot(newRoot: string): { memoryRoot: string; vectorStorePath: string; memoryDbPath: string } {
+export function setMemoryRoot(newRoot: string): { memoryRoot: string; vectorStorePath: string; memoryDbPath: string; performanceDbPath: string } {
   if (!newRoot || !newRoot.trim()) throw new Error('Path folder tidak boleh kosong')
   if (!path.isAbsolute(newRoot)) throw new Error('Gunakan path folder absolut (contoh: D:\\ai-memory atau /mnt/flashdisk/ai-memory)')
 
@@ -331,21 +335,23 @@ export function setMemoryRoot(newRoot: string): { memoryRoot: string; vectorStor
   config.memoryRoot = resolved
   config.vectorStorePath = derived.vectorStorePath
   config.memoryDbPath = derived.memoryDbPath
+  config.performanceDbPath = derived.performanceDbPath
   writeStoragePointer(resolved)
 
-  return { memoryRoot: config.memoryRoot, vectorStorePath: config.vectorStorePath, memoryDbPath: config.memoryDbPath }
+  return { memoryRoot: config.memoryRoot, vectorStorePath: config.vectorStorePath, memoryDbPath: config.memoryDbPath, performanceDbPath: config.performanceDbPath }
 }
 
-export function resetMemoryRootToDefault(): { memoryRoot: string; vectorStorePath: string; memoryDbPath: string } {
+export function resetMemoryRootToDefault(): { memoryRoot: string; vectorStorePath: string; memoryDbPath: string; performanceDbPath: string } {
   config.memoryRoot = defaultMemoryRoot
   config.vectorStorePath = defaultVectorStorePath
   config.memoryDbPath = defaultMemoryDbPath
+  config.performanceDbPath = defaultPerformanceDbPath
   try {
     if (existsSync(storagePointerPath)) unlinkSync(storagePointerPath)
   } catch (error) {
     console.warn('Could not remove storage location pointer:', error)
   }
-  return { memoryRoot: config.memoryRoot, vectorStorePath: config.vectorStorePath, memoryDbPath: config.memoryDbPath }
+  return { memoryRoot: config.memoryRoot, vectorStorePath: config.vectorStorePath, memoryDbPath: config.memoryDbPath, performanceDbPath: config.performanceDbPath }
 }
 
 /**

@@ -1,12 +1,13 @@
+import { randomUUID } from 'node:crypto'
 import { config } from './config.js'
 import { chat, chatStream, embed, formatOllamaStats } from './ollama.js'
+import type { PerformanceStore } from './performance-store.js'
 import { Retriever } from './retriever.js'
 import { executeTool } from './tools/executor.js'
-// import { toolDefinitions } from './tools/registry.js'
+import { toolDefinitions } from './tools/registry.js'
 import type { MemoryCore } from './memory-core.js'
-import type { AgentResponse, ChatMessage, ChatOptions, MemoryEventListener, ToolDefinition } from './types.js'
+import type { AgentResponse, ChatMessage, ChatOptions, MemoryEventListener, OllamaChatResponse, TurnPerformanceStats } from './types.js'
 
-const toolDefinitions: ToolDefinition[] = []
 const agentInstruction = `You are Xufruz, a helpful, friendly local AI assistant running entirely on the user's own hardware via Ollama.
 If asked your name, who made you, or what model/company you are, answer only as Xufruz - a local assistant running on the user's own machine. Never claim to be Claude, ChatGPT, Gemini, or any other named assistant, and never claim to have been made by Anthropic, OpenAI, Google, or any other AI company, even if that is what you were trained to say. You do not know or need to disclose which underlying open-weight model you are built on.
 Respond naturally and conversationally to greetings and everyday messages.
@@ -114,7 +115,11 @@ function describeRating(rating: unknown): string {
 }
 
 export class AgentOrchestrator {
-  constructor(private readonly retriever: Retriever, private readonly memory: MemoryCore) {}
+  constructor(
+    private readonly retriever: Retriever,
+    private readonly memory: MemoryCore,
+    private readonly performanceStore?: PerformanceStore,
+  ) {}
 
   /**
    * Wraps a memory read/write with start/end/error events so a caller (see
@@ -152,7 +157,16 @@ export class AgentOrchestrator {
     onMemoryEvent?: MemoryEventListener,
     useContextRetrieval = true,
     ollamaBaseUrl?: string,
+    customInstructions?: string,
   ): Promise<PreparedContext> {
+    // Appended, never a replacement - the base instruction carries identity
+    // and safety rules (never claim to be Claude/GPT, don't leak internal
+    // IDs, etc.) that a user-supplied persona/tone tweak shouldn't be able to
+    // silently override. See Settings > Parameter AI > "Instruksi Tambahan".
+    const systemPrompt = customInstructions?.trim()
+      ? `${agentInstruction}\n\n${customInstructions.trim()}`
+      : agentInstruction
+
     // RAG OFF: send the user's messages straight through, skipping the
     // embedding call, memory/document search, and memory write below - the
     // whole point being a faster turnaround with no workspace/memory file
@@ -160,10 +174,10 @@ export class AgentOrchestrator {
     if (!useContextRetrieval) {
       console.log('[chat timing] context/retrieval skipped (RAG OFF)')
       const window = numCtx && numCtx > 0 ? numCtx : config.numCtxFallback
-      const historyBudget = window * (1 - RESPONSE_RESERVE_SHARE) * CHARS_PER_TOKEN - agentInstruction.length
+      const historyBudget = window * (1 - RESPONSE_RESERVE_SHARE) * CHARS_PER_TOKEN - systemPrompt.length
       return {
         messages: [
-          { role: 'system', content: agentInstruction },
+          { role: 'system', content: systemPrompt },
           ...trimHistoryToBudget(input, Math.max(historyBudget, window * CHARS_PER_TOKEN * 0.25)),
         ],
         retrievedChunks: 0,
@@ -239,7 +253,7 @@ export class AgentOrchestrator {
     // Whatever the window has left after the system prompt, the injected
     // context, and room for the reply is what the conversation itself gets.
     const window = numCtx && numCtx > 0 ? numCtx : config.numCtxFallback
-    const overheadChars = agentInstruction.length + context.length + memoryContext.length
+    const overheadChars = systemPrompt.length + context.length + memoryContext.length
     const historyBudget = Math.max(
       window * (1 - RESPONSE_RESERVE_SHARE) * CHARS_PER_TOKEN - overheadChars,
       // Never squeeze the conversation to nothing, even with a tiny window.
@@ -247,7 +261,7 @@ export class AgentOrchestrator {
     )
 
     const messages: ChatMessage[] = [
-      { role: 'system', content: agentInstruction },
+      { role: 'system', content: systemPrompt },
       ...(context ? [{ role: 'system' as const, content: context }] : []),
       ...(memoryContext ? [{ role: 'system' as const, content: memoryContext }] : []),
       ...trimHistoryToBudget(input, historyBudget),
@@ -256,6 +270,44 @@ export class AgentOrchestrator {
     // Report what was actually injected, not what was fetched - the budget
     // above may well have dropped some of it.
     return { messages, retrievedChunks: retrievedParts.length }
+  }
+
+  /**
+   * Builds the full per-turn performance record (see TurnPerformanceStats),
+   * persists it (best-effort - see PerformanceStore.record), and returns it
+   * so the caller can also hand it back to the client alongside the reply.
+   */
+  private recordTurnStats(params: {
+    conversationId: string
+    model: string
+    ollamaBaseUrl?: string
+    ragEnabled: boolean
+    contextMs: number
+    generationMs: number
+    toolRounds: number
+    retrievedChunks: number
+    response: OllamaChatResponse
+  }): TurnPerformanceStats {
+    const stats: TurnPerformanceStats = {
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      conversationId: params.conversationId,
+      model: params.model,
+      ollamaBaseUrl: params.ollamaBaseUrl || config.ollamaBaseUrl,
+      ragEnabled: params.ragEnabled,
+      contextMs: params.contextMs,
+      generationMs: params.generationMs,
+      toolRounds: params.toolRounds,
+      retrievedChunks: params.retrievedChunks,
+      totalDuration: params.response.total_duration,
+      loadDuration: params.response.load_duration,
+      promptEvalCount: params.response.prompt_eval_count,
+      promptEvalDuration: params.response.prompt_eval_duration,
+      evalCount: params.response.eval_count,
+      evalDuration: params.response.eval_duration,
+    }
+    this.performanceStore?.record(stats)
+    return stats
   }
 
   async run(
@@ -267,26 +319,30 @@ export class AgentOrchestrator {
     signal?: AbortSignal,
     onMemoryEvent?: MemoryEventListener,
     useContextRetrieval = true,
+    customInstructions?: string,
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
-    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl)
-    logTurnTiming('context/retrieval', ollamaBaseUrl, Date.now() - prepareStartedAt)
+    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl, customInstructions)
+    const contextMs = Date.now() - prepareStartedAt
+    logTurnTiming('context/retrieval', ollamaBaseUrl, contextMs)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
       const generationStartedAt = Date.now()
       const response = await chat(messages, toolDefinitions, model, options, ollamaBaseUrl, signal)
-      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt, formatOllamaStats(response))
+      const generationMs = Date.now() - generationStartedAt
+      logTurnTiming('generation', ollamaBaseUrl, generationMs, formatOllamaStats(response))
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
+        const performance = this.recordTurnStats({ conversationId, model, ollamaBaseUrl, ragEnabled: useContextRetrieval, contextMs, generationMs, toolRounds: round, retrievedChunks, response })
         if (!useContextRetrieval) {
-          return { message: response.message, toolRounds: round, retrievedChunks }
+          return { message: response.message, toolRounds: round, retrievedChunks, performance }
         }
         const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-assistant', () =>
           this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }, undefined, ollamaBaseUrl),
         )
-        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
+        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id, performance }
       }
 
       for (const call of toolCalls) {
@@ -313,26 +369,30 @@ export class AgentOrchestrator {
     signal?: AbortSignal,
     onMemoryEvent?: MemoryEventListener,
     useContextRetrieval = true,
+    customInstructions?: string,
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
-    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl)
-    logTurnTiming('context/retrieval', ollamaBaseUrl, Date.now() - prepareStartedAt)
+    const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl, customInstructions)
+    const contextMs = Date.now() - prepareStartedAt
+    logTurnTiming('context/retrieval', ollamaBaseUrl, contextMs)
 
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
       const generationStartedAt = Date.now()
       const response = await chatStream(messages, toolDefinitions, model, onToken, options, ollamaBaseUrl, signal)
-      logTurnTiming('generation', ollamaBaseUrl, Date.now() - generationStartedAt, formatOllamaStats(response))
+      const generationMs = Date.now() - generationStartedAt
+      logTurnTiming('generation', ollamaBaseUrl, generationMs, formatOllamaStats(response))
       messages.push(response.message)
       const toolCalls = response.message.tool_calls ?? []
       if (!toolCalls.length) {
+        const performance = this.recordTurnStats({ conversationId, model, ollamaBaseUrl, ragEnabled: useContextRetrieval, contextMs, generationMs, toolRounds: round, retrievedChunks, response })
         if (!useContextRetrieval) {
-          return { message: response.message, toolRounds: round, retrievedChunks }
+          return { message: response.message, toolRounds: round, retrievedChunks, performance }
         }
         const appended = await this.withMemoryEvent(onMemoryEvent, 'write', 'append-assistant', () =>
           this.memory.appendMessage('assistant', response.message.content, { conversationId, provider: 'agent-server' }, undefined, ollamaBaseUrl),
         )
-        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id }
+        return { message: response.message, toolRounds: round, retrievedChunks, memoryId: appended.id, performance }
       }
       for (const call of toolCalls) {
         let result: string

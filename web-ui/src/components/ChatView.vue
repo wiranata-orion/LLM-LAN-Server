@@ -2,8 +2,8 @@
 import { ref, nextTick, watch, onMounted, computed } from 'vue'
 import MessageBubble from './MessageBubble.vue'
 import ChatInput from './ChatInput.vue'
-import { Bot, Sparkles, Cpu, Zap, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-vue-next'
-import { getModelDisplayName, formatDuration } from '../services/api.js'
+import { Bot, Sparkles, Cpu, Zap, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Gauge } from 'lucide-vue-next'
+import { getModelDisplayName, formatDuration, perfSummary, perfTooltip } from '../services/api.js'
 
 const props = defineProps({
   messages: {
@@ -17,6 +17,13 @@ const props = defineProps({
   modelName: {
     type: String,
     default: '',
+  },
+  // Whether the selected model declares Ollama's "vision" capability - see
+  // App.vue's updateModelVisionSupport. Forwarded straight to ChatInput,
+  // which hides the "Upload Gambar" option entirely when this is false.
+  supportsImages: {
+    type: Boolean,
+    default: false,
   },
   generationElapsedSeconds: {
     type: Number,
@@ -86,8 +93,8 @@ onMounted(() => {
   chatInputRef.value?.focusInput()
 })
 
-function handleSend(text, files) {
-  emit('send', text, files)
+function handleSend(text, files, images) {
+  emit('send', text, files, images)
 }
 
 function handleStop() {
@@ -198,6 +205,14 @@ function emitRegenerate() {
 
               <div class="message-meta">
                 <span v-if="msg.durationMs" class="duration-label" :title="`Waktu respons: ${formatDuration(msg.durationMs)}`">{{ formatDuration(msg.durationMs) }}</span>
+                <span
+                  v-if="perfSummary(msg.performance)"
+                  class="perf-label"
+                  :title="perfTooltip(msg.performance)"
+                >
+                  <Gauge :size="11" />
+                  {{ perfSummary(msg.performance) }}
+                </span>
                 <span class="model-label" v-if="msg.model" :title="msg.model">{{ getModelDisplayName(msg.model) }}</span>
               </div>
             </div>
@@ -214,6 +229,7 @@ function emitRegenerate() {
       ref="chatInputRef"
       :disabled="isGenerating"
       :is-generating="isGenerating"
+      :supports-images="supportsImages"
       @send="handleSend"
       @stop="handleStop"
     />
@@ -478,6 +494,17 @@ function emitRegenerate() {
   color: var(--color-text-muted);
   font-family: var(--font-mono);
   opacity: 0.8;
+}
+
+.perf-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  opacity: 0.8;
+  cursor: default;
 }
 
 .model-label {

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import crypto from 'node:crypto'
 import { chunkText } from './chunker.js'
 import { decodeFileBuffer } from './encoding.js'
+import { extractTextFromBinaryFile } from './file-extract.js'
 import { embed } from './ollama.js'
 import { VectorStore } from './vector-store.js'
 import type { DocumentInput, VectorRecord } from './types.js'
@@ -44,10 +45,18 @@ export class IngestionService {
       if (INTERNAL_STORAGE_FILE.test(document.source)) {
         throw new Error(`"${document.source}" is one of the app's own memory files and cannot be added as a document`)
       }
-      if (looksBinary(document.content)) {
+
+      // A PDF/DOCX/XLSX arrives as base64 (see routes.ts's documentSchema) -
+      // it must be extracted to text before it can be chunked at all, so this
+      // runs before the looksBinary check below rather than instead of it.
+      const content = document.encoding === 'base64'
+        ? await extractTextFromBinaryFile(document.source, Buffer.from(document.content, 'base64'))
+        : document.content
+
+      if (looksBinary(content)) {
         throw new Error(`"${document.source}" looks like a binary file, not text - only text documents can be added`)
       }
-      const chunks = chunkText(document.content)
+      const chunks = chunkText(content)
       for (const chunk of chunks) {
         const id = document.id
           ? `${document.id}:${chunk.index}`

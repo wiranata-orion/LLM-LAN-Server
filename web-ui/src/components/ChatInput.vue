@@ -1,6 +1,6 @@
 <script setup>
 import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
-import { Send, Square, Plus, Paperclip, FileText, X } from 'lucide-vue-next'
+import { Send, Square, Plus, Paperclip, FileText, X, Image as ImageIcon } from 'lucide-vue-next'
 
 const props = defineProps({
   disabled: {
@@ -11,6 +11,14 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  // Whether the currently selected model can take image input - see App.vue's
+  // updateModelVisionSupport. False hides the "Upload Gambar" option
+  // entirely, instead of letting the user attach an image the model will
+  // just reject once the request reaches Ollama.
+  supportsImages: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 const emit = defineEmits(['send', 'stop'])
@@ -18,8 +26,13 @@ const emit = defineEmits(['send', 'stop'])
 const input = ref('')
 const textareaRef = ref(null)
 const fileInputRef = ref(null)
+const imageInputRef = ref(null)
 const showAddMenu = ref(false)
 const attachedFiles = ref([])
+// { file, previewUrl } - previewUrl is a local object URL for the thumbnail
+// only; the actual base64/resize conversion happens in App.vue right before
+// sending (see image.js), not here, so this component stays UI-only.
+const attachedImages = ref([])
 
 function autoResize() {
   const el = textareaRef.value
@@ -62,15 +75,43 @@ function openFilePicker() {
   fileInputRef.value?.click()
 }
 
+function openImagePicker() {
+  showAddMenu.value = false
+  imageInputRef.value?.click()
+}
+
 function handleFileSelect(e) {
   const files = Array.from(e.target.files || [])
   attachedFiles.value.push(...files)
   e.target.value = ''
 }
 
+function handleImageSelect(e) {
+  const files = Array.from(e.target.files || [])
+  for (const file of files) {
+    attachedImages.value.push({ file, previewUrl: URL.createObjectURL(file) })
+  }
+  e.target.value = ''
+}
+
 function removeAttachedFile(index) {
   attachedFiles.value.splice(index, 1)
 }
+
+function removeAttachedImage(index) {
+  URL.revokeObjectURL(attachedImages.value[index].previewUrl)
+  attachedImages.value.splice(index, 1)
+}
+
+// Switching to a model without vision support while images are still staged
+// (attached, then the user picked a different model before sending) must
+// not silently carry them into the next send - that's exactly the request
+// Ollama rejects (see ollama.ts's parseError "image input is not supported").
+watch(() => props.supportsImages, (supported) => {
+  if (supported || !attachedImages.value.length) return
+  for (const image of attachedImages.value) URL.revokeObjectURL(image.previewUrl)
+  attachedImages.value = []
+})
 
 function formatFileSize(bytes) {
   if (!bytes) return ''
@@ -81,10 +122,12 @@ function formatFileSize(bytes) {
 
 function sendMessage() {
   const text = input.value.trim()
-  if ((!text && attachedFiles.value.length === 0) || props.disabled) return
-  emit('send', text, [...attachedFiles.value])
+  if ((!text && attachedFiles.value.length === 0 && attachedImages.value.length === 0) || props.disabled) return
+  emit('send', text, [...attachedFiles.value], attachedImages.value.map((i) => i.file))
   input.value = ''
   attachedFiles.value = []
+  for (const image of attachedImages.value) URL.revokeObjectURL(image.previewUrl)
+  attachedImages.value = []
   nextTick(autoResize)
 }
 
@@ -132,6 +175,16 @@ defineExpose({ focusInput, restoreDraft })
       </div>
     </div>
 
+    <!-- Attached Images Preview -->
+    <div v-if="attachedImages.length" class="attached-images-row">
+      <div v-for="(image, index) in attachedImages" :key="`${image.file.name}-${index}`" class="attached-image-thumb">
+        <img :src="image.previewUrl" :alt="image.file.name" />
+        <button class="attached-image-remove" @click="removeAttachedImage(index)" title="Hapus gambar">
+          <X :size="12" />
+        </button>
+      </div>
+    </div>
+
     <div class="chat-input-wrapper glass glow-accent">
       <!-- "+" Add Menu (attach files, etc.) -->
       <div class="add-menu-wrapper">
@@ -151,6 +204,10 @@ defineExpose({ focusInput, restoreDraft })
               <Paperclip :size="14" />
               <span>Pilih File</span>
             </button>
+            <button v-if="supportsImages" class="add-menu-option" @click="openImagePicker" type="button">
+              <ImageIcon :size="14" />
+              <span>Upload Gambar</span>
+            </button>
           </div>
         </Transition>
 
@@ -159,8 +216,17 @@ defineExpose({ focusInput, restoreDraft })
           type="file"
           multiple
           class="file-hidden-input"
-          accept=".txt,.md,.markdown,.csv,.json,.log,.js,.ts,.jsx,.tsx,.py,.html,.css,.yml,.yaml,.xml"
+          accept=".txt,.md,.markdown,.csv,.json,.log,.js,.ts,.jsx,.tsx,.py,.html,.css,.yml,.yaml,.xml,.pdf,.docx,.xlsx,.xls"
           @change="handleFileSelect"
+        />
+        <input
+          v-if="supportsImages"
+          ref="imageInputRef"
+          type="file"
+          multiple
+          class="file-hidden-input"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          @change="handleImageSelect"
         />
       </div>
 
@@ -188,9 +254,9 @@ defineExpose({ focusInput, restoreDraft })
         <button
           v-else
           @click="sendMessage"
-          :disabled="(!input.trim() && attachedFiles.length === 0) || disabled"
+          :disabled="(!input.trim() && attachedFiles.length === 0 && attachedImages.length === 0) || disabled"
           class="send-btn"
-          :class="{ 'send-btn--active': (input.trim() || attachedFiles.length) && !disabled }"
+          :class="{ 'send-btn--active': (input.trim() || attachedFiles.length || attachedImages.length) && !disabled }"
           title="Send message (Enter)"
           id="send-btn"
         >
@@ -265,6 +331,51 @@ defineExpose({ focusInput, restoreDraft })
 .attached-file-remove:hover {
   color: var(--color-danger);
   background: rgba(239, 68, 68, 0.12);
+}
+
+/* Attached Images Preview Row */
+.attached-images-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.attached-image-thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+}
+
+.attached-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attached-image-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  border: none;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.attached-image-remove:hover {
+  background: var(--color-danger);
 }
 
 /* "+" Add Menu */

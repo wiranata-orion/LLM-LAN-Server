@@ -1,6 +1,6 @@
 import { Agent, setGlobalDispatcher } from 'undici'
 import { config } from './config.js'
-import type { ChatMessage, ChatOptions, OllamaChatResponse, ToolDefinition } from './types.js'
+import type { ChatMessage, ChatOptions, OllamaChatResponse, OllamaPullProgress, OllamaRunningModel, ToolDefinition } from './types.js'
 
 // Node's global fetch() is backed by undici, whose default Agent gives up on
 // a request that goes quiet for more than 300s (headersTimeout: no response
@@ -27,6 +27,7 @@ interface OllamaShowResponse {
 }
 
 const toolSupportCache = new Map<string, boolean>()
+const visionSupportCache = new Map<string, boolean>()
 
 export class OllamaError extends Error {
   constructor(message: string, readonly status?: number) {
@@ -37,6 +38,16 @@ export class OllamaError extends Error {
 
 async function parseError(response: Response): Promise<never> {
   const body = await response.text().catch(() => '')
+  // llama.cpp-backed engines (and Ollama itself, for a model pulled without
+  // its projector) return this when a message carries images but the loaded
+  // model has no mmproj attached - a plain-text model was never going to
+  // handle vision input, so this is a model/config mismatch, not a bug.
+  if (/image input is not supported|mmproj/i.test(body)) {
+    throw new OllamaError(
+      'Model yang sedang dipakai tidak mendukung input gambar (bukan model vision, atau mmproj-nya belum dimuat). Pilih model vision (misalnya Qwen2.5-VL, LLaVA, atau llama3.2-vision) sebelum mengirim gambar.',
+      response.status,
+    )
+  }
   throw new OllamaError(`Ollama request failed (${response.status}): ${body || response.statusText}`, response.status)
 }
 
@@ -99,7 +110,15 @@ function resolveKeepAlive(value: string): number | string {
   return /^-?\d+$/.test(trimmed) ? Number(trimmed) : trimmed
 }
 
-async function supportsTools(model: string, baseUrl: string): Promise<boolean> {
+/**
+ * Whether this model declares Ollama's "tools" capability (GET /api/show).
+ * Cached per model+engine since it never changes for a given install.
+ * requestChat() below uses this itself to decide whether to attach tool
+ * definitions at all; exported separately too so the web-ui can show the
+ * user which of their installed models actually support tool-calling,
+ * instead of it only ever surfacing as a silent fallback.
+ */
+export async function supportsTools(model: string, baseUrl: string): Promise<boolean> {
   const cacheKey = `${baseUrl}::${model}`
   const cached = toolSupportCache.get(cacheKey)
   if (cached !== undefined) return cached
@@ -114,6 +133,34 @@ async function supportsTools(model: string, baseUrl: string): Promise<boolean> {
     const payload = await response.json() as OllamaShowResponse
     const supported = payload.capabilities?.includes('tools') ?? false
     toolSupportCache.set(cacheKey, supported)
+    return supported
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether this model declares Ollama's "vision" capability (GET /api/show) -
+ * lets the web-ui hide the image-attach button entirely for a model that
+ * can't use it, instead of the user only finding out after sending an image
+ * and getting back the "image input is not supported / mmproj" error (see
+ * parseError above). Cached per model+engine, same as supportsTools.
+ */
+export async function supportsVision(model: string, baseUrl: string): Promise<boolean> {
+  const cacheKey = `${baseUrl}::${model}`
+  const cached = visionSupportCache.get(cacheKey)
+  if (cached !== undefined) return cached
+
+  try {
+    const response = await fetchOllama(`${baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+    })
+    if (!response.ok) return false
+    const payload = await response.json() as OllamaShowResponse
+    const supported = payload.capabilities?.includes('vision') ?? false
+    visionSupportCache.set(cacheKey, supported)
     return supported
   } catch {
     return false
@@ -317,4 +364,80 @@ export async function ping(baseUrl: string = config.ollamaBaseUrl, signal?: Abor
   const response = await fetchOllama(`${baseUrl}/api/version`, {}, signal)
   if (!response.ok) await parseError(response)
   return await response.json() as { version: string }
+}
+
+/**
+ * Models currently resident in VRAM on this engine (Ollama's GET /api/ps),
+ * with their size and when they'll be auto-unloaded. This is what actually
+ * shows whether the chat model and embedding model are coexisting or
+ * fighting each other for the same VRAM - see the Performance Dashboard.
+ */
+export async function listRunningModels(baseUrl: string = config.ollamaBaseUrl, signal?: AbortSignal): Promise<OllamaRunningModel[]> {
+  const response = await fetchOllama(`${baseUrl}/api/ps`, {}, signal)
+  if (!response.ok) await parseError(response)
+  const payload = await response.json() as { models?: OllamaRunningModel[] }
+  return payload.models ?? []
+}
+
+/**
+ * Downloads a model, streaming Ollama's own progress lines (status, and for
+ * the actual layer downloads: digest/total/completed bytes) so the caller can
+ * show a real progress bar instead of an indeterminate spinner for what can
+ * be a multi-gigabyte, many-minutes download. The undici bodyTimeout (see the
+ * Agent above) resets on every progress line Ollama sends, so a long-but-
+ * actively-progressing pull is never killed - only a genuinely stalled one is.
+ */
+export async function pullModel(
+  model: string,
+  onProgress: (progress: OllamaPullProgress) => void,
+  baseUrl: string = config.ollamaBaseUrl,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetchOllama(`${baseUrl}/api/pull`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, stream: true }),
+  }, signal)
+  if (!response.ok) await parseError(response)
+  if (!response.body) throw new OllamaError('Ollama returned no stream body')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const consume = (line: string) => {
+    if (!line.trim()) return
+    const payload = JSON.parse(line) as OllamaPullProgress
+    onProgress(payload)
+    if (payload.error) throw new OllamaError(payload.error)
+  }
+
+  try {
+    let done = false
+    while (!done) {
+      const result = await reader.read()
+      if (result.done) break
+      buffer += decoder.decode(result.value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) consume(line)
+    }
+    if (buffer.trim()) consume(buffer)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (error instanceof OllamaError) throw error
+    const description = describeNetworkError(error, `${baseUrl}/api/pull`)
+    if (description) throw new OllamaError(description)
+    throw error
+  }
+}
+
+/** Removes a model from disk. `model` is the full name as shown by /api/tags (e.g. "llama3.2:latest"). */
+export async function deleteModel(model: string, baseUrl: string = config.ollamaBaseUrl, signal?: AbortSignal): Promise<void> {
+  const response = await fetchOllama(`${baseUrl}/api/delete`, {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model }),
+  }, signal)
+  if (!response.ok) await parseError(response)
 }

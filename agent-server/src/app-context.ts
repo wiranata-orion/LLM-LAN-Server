@@ -1,6 +1,7 @@
 import { config } from './config.js'
 import { IngestionService } from './ingestion.js'
 import { AgentOrchestrator } from './orchestrator.js'
+import { PerformanceStore } from './performance-store.js'
 import { Retriever } from './retriever.js'
 import { VectorStore } from './vector-store.js'
 import { SqliteMemoryCore } from './memory-core.js'
@@ -11,6 +12,7 @@ interface AppServices {
   ingestion: IngestionService
   retriever: Retriever
   orchestrator: AgentOrchestrator
+  performanceStore: PerformanceStore
 }
 
 function buildServices(): AppServices {
@@ -18,8 +20,9 @@ function buildServices(): AppServices {
   const memory = new SqliteMemoryCore(store)
   const ingestion = new IngestionService(store)
   const retriever = new Retriever(store)
-  const orchestrator = new AgentOrchestrator(retriever, memory)
-  return { store, memory, ingestion, retriever, orchestrator }
+  const performanceStore = new PerformanceStore()
+  const orchestrator = new AgentOrchestrator(retriever, memory, performanceStore)
+  return { store, memory, ingestion, retriever, orchestrator, performanceStore }
 }
 
 /**
@@ -43,6 +46,11 @@ export class AppContext {
       previous.store.close()
     } catch (error) {
       console.warn('Failed to close previous vector store:', error)
+    }
+    try {
+      previous.performanceStore.close()
+    } catch (error) {
+      console.warn('Failed to close previous performance store:', error)
     }
   }
 }
