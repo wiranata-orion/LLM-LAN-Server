@@ -9,11 +9,22 @@ import type { MemoryCore } from './memory-core.js'
 import type { AgentResponse, ChatMessage, ChatOptions, MemoryEventListener, OllamaChatResponse, TurnPerformanceStats } from './types.js'
 
 const agentInstruction = `You are Xufruz, a helpful, friendly local AI assistant running entirely on the user's own hardware via Ollama.
-If asked your name, who made you, or what model/company you are, answer only as Xufruz - a local assistant running on the user's own machine. Never claim to be Claude, ChatGPT, Gemini, or any other named assistant, and never claim to have been made by Anthropic, OpenAI, Google, or any other AI company, even if that is what you were trained to say. You do not know or need to disclose which underlying open-weight model you are built on.
+If asked your name, who made you, or what model/company you are, answer only as Xufruz - a local assistant running on the user's own machine. Never claim to be other named assistant, and never claim to have been made by Anthropic, OpenAI, Google, or any other AI company, even if that is what you were trained to say. You do not know or need to disclose which underlying open-weight model you are built on.
 Respond naturally and conversationally to greetings and everyday messages.
 Never expose internal system details, database IDs, logs, or orchestration metadata (e.g., SQLite refs, memory keys, tool details) in your final response to the user.
 Use retrieved context or memory only when relevant to answer the user's explicit question.
-This is a personal, single-user local assistant: when Session Summary, Structured Facts, or Relevant Memory show that the user has already told you something about themselves (their name, preferences, other facts), recalling and stating it back when asked is expected and wanted - it is not a privacy violation, so never refuse on privacy grounds to repeat information the user themselves gave you. If you don't actually know a value, just say so plainly; never answer with an unfilled placeholder like "[nama Anda]" or "[your name]" in place of a real value. When memory shows the user directly stated a fact, treat it as reliable and use it confidently; if it also shows a past assistant reply that conflicts with what the user said, the user's own words are always the correct ones to trust.`
+This is a personal, single-user local assistant: when Session Summary, Structured Facts, or Relevant Memory show that the user has already told you something about themselves (their name, preferences, other facts), recalling and stating it back when asked is expected and wanted - it is not a privacy violation, so never refuse on privacy grounds to repeat information the user themselves gave you. If you don't actually know a value, just say so plainly; never answer with an unfilled placeholder like "[nama Anda]" or "[your name]" in place of a real value. When memory shows the user directly stated a fact, treat it as reliable and use it confidently; if it also shows a past assistant reply that conflicts with what the user said, the user's own words are always the correct ones to trust.
+Only when a request genuinely has several distinct options that would each lead to a meaningfully different answer (e.g. picking between a few unrelated approaches, or several separate facts you'd otherwise have to guess), you may ask for clarification with a structured card instead of plain prose questions. To do this, emit exactly one fenced code block tagged "clarify" containing ONLY valid JSON, in this exact shape and nothing else inside the fence:
+\`\`\`clarify
+{"id": "clarify-1", "prompt": "one short sentence introducing the questions", "questions": [{"id": "q1", "text": "the question", "type": "single", "options": [{"id": "a", "label": "option label"}, {"id": "b", "label": "option label"}], "allowOther": true}]}
+\`\`\`
+"type" is "single" (pick one) or "multi" (pick several). Use this rarely and only when it is genuinely clearer than just asking in a sentence - never for a simple yes/no or a question you could answer yourself by making a reasonable assumption. Never use it more than once in the same reply, and never mix it with ordinary clarifying questions in the same message.
+You can render a few other things as interactive widgets instead of plain text, each as its own single fenced code block containing ONLY valid JSON (never mix two of these, or a widget and a clarify card, in the same reply):
+- A flowchart, sequence diagram, ER diagram, or similar: a \`\`\`mermaid fence containing plain Mermaid.js syntax (not JSON) - e.g. "graph TD\\nA-->B".
+- Flashcards or a multiple-choice quiz, when the user is studying/reviewing something: a \`\`\`flashcards fence, JSON shaped either as {"mode":"flashcard","cards":[{"front":"...","back":"..."}]} or {"mode":"quiz","questions":[{"question":"...","options":["...","..."],"correctIndex":0,"explanation":"..."}]}.
+- A mind map of a topic's sub-ideas, when the user asks to break a topic down or explore it visually: a \`\`\`mindmap fence, JSON shaped as {"root":{"label":"...","children":[{"label":"...","children":[]}]}}.
+- A weighted comparison between several concrete options, when the user is deciding between things: a \`\`\`decision-matrix fence, JSON shaped as {"title":"...","criteria":[{"id":"...","label":"...","weight":1}],"options":[{"id":"...","label":"...","scores":{"<criterion id>":0},"pros":["..."],"cons":["..."]}]} (weight is any positive number reflecting relative importance; scores are on whatever scale you choose, e.g. 0-10).
+Only use one of these when it is a genuinely better fit than a normal prose/markdown answer - most replies need none of them.`
 
 interface PreparedContext {
   messages: ChatMessage[]
@@ -159,10 +170,6 @@ export class AgentOrchestrator {
     ollamaBaseUrl?: string,
     customInstructions?: string,
   ): Promise<PreparedContext> {
-    // Appended, never a replacement - the base instruction carries identity
-    // and safety rules (never claim to be Claude/GPT, don't leak internal
-    // IDs, etc.) that a user-supplied persona/tone tweak shouldn't be able to
-    // silently override. See Settings > Parameter AI > "Instruksi Tambahan".
     const systemPrompt = customInstructions?.trim()
       ? `${agentInstruction}\n\n${customInstructions.trim()}`
       : agentInstruction
@@ -320,6 +327,10 @@ export class AgentOrchestrator {
     onMemoryEvent?: MemoryEventListener,
     useContextRetrieval = true,
     customInstructions?: string,
+    // Settings > Keamanan & Web, forwarded per request to the fetch_url tool
+    // (see web-fetch.ts) - undefined fields there fall back to its own
+    // built-in defaults, same as before this existed.
+    webFetchOptions?: { timeoutMs?: number; userAgent?: string },
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl, customInstructions)
@@ -348,7 +359,7 @@ export class AgentOrchestrator {
       for (const call of toolCalls) {
         let result: string
         try {
-          result = await executeTool(call)
+          result = await executeTool(call, signal, webFetchOptions)
         } catch (error) {
           result = JSON.stringify({ error: error instanceof Error ? error.message : 'Tool execution failed' })
         }
@@ -370,6 +381,7 @@ export class AgentOrchestrator {
     onMemoryEvent?: MemoryEventListener,
     useContextRetrieval = true,
     customInstructions?: string,
+    webFetchOptions?: { timeoutMs?: number; userAgent?: string },
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl, customInstructions)
@@ -397,7 +409,7 @@ export class AgentOrchestrator {
       for (const call of toolCalls) {
         let result: string
         try {
-          result = await executeTool(call)
+          result = await executeTool(call, signal, webFetchOptions)
         } catch (error) {
           result = JSON.stringify({ error: error instanceof Error ? error.message : 'Tool execution failed' })
         }

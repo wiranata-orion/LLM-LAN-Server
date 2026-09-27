@@ -1,7 +1,11 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import hljs from 'highlight.js/lib/common'
-import { Check, Copy, GitCompare, FileCode, Loader2, X, Undo2, ChevronRight, ChevronDown } from 'lucide-vue-next'
+import { Check, Copy, GitCompare, FileCode, Loader2, X, Undo2, ChevronRight, ChevronDown, Code2, Eye, Database, Play } from 'lucide-vue-next'
+import UniversalPreviewCanvas from './UniversalPreviewCanvas.vue'
+import SqlPlayground from './SqlPlayground.vue'
+import CodeRunnerOutput from './CodeRunnerOutput.vue'
+import { getSettings } from '../services/api.js'
 
 const props = defineProps({
   code: { type: String, required: true },
@@ -43,6 +47,68 @@ const highlighted = computed(() => {
 })
 
 const lineCount = computed(() => props.code.split('\n').length)
+
+// ===== Universal Preview Canvas (#27, extends the earlier #3 Live Preview) -
+// untargeted, self-contained blocks only. A file-targeted block belongs in
+// the editor's diff, not a live iframe here, and a bare CSS/JS fragment has
+// nothing of its own to render. Three kinds are previewable: raw HTML/SVG
+// (rendered as-is), a Vue SFC (compiled via vuePreviewCompiler.js), and a
+// React JSX/TSX component (compiled via reactPreviewCompiler.js) - see
+// previewBundler.js for how each becomes a sandboxed iframe document. =====
+const PREVIEW_KIND_BY_LANGUAGE = {
+  html: 'html', svg: 'html',
+  vue: 'vue',
+  jsx: 'react', tsx: 'react',
+}
+const previewKind = computed(() => {
+  if (props.filePath || props.isStreaming) return null
+  const lang = (props.language || '').toLowerCase()
+  if (PREVIEW_KIND_BY_LANGUAGE[lang]) return PREVIEW_KIND_BY_LANGUAGE[lang]
+  if (/<!DOCTYPE html|<html[\s>]/i.test(props.code)) return 'html'
+  return null
+})
+const isPreviewable = computed(() => previewKind.value !== null)
+const previewIsTypescript = computed(() => (props.language || '').toLowerCase() === 'tsx')
+
+// Interactive SQL Playground (#7) - same "untargeted block only" rule as the
+// live preview above: a file-targeted SQL migration belongs in the editor's
+// diff, not run against a throwaway database here.
+const isSqlBlock = computed(() => (
+  !props.filePath && !props.isStreaming && (props.language || '').toLowerCase() === 'sql'
+))
+
+// In-Browser Multi-Language Code Runner (#28) - same "untargeted block
+// only" rule as the two above. Maps the fence's language tag to whichever
+// runner in codeExecutionEngine.js/shellSimulator.js actually handles it;
+// null for anything else (e.g. a language-less block, or one with no runner
+// at all like a Vue/React SFC - #27's job, not this one).
+const RUNNER_BY_LANGUAGE = {
+  js: 'javascript', javascript: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', typescript: 'typescript',
+  py: 'python', python: 'python',
+  sh: 'shell', bash: 'shell', shell: 'shell',
+}
+const runnerKind = computed(() => {
+  if (props.filePath || props.isStreaming) return null
+  return RUNNER_BY_LANGUAGE[(props.language || '').toLowerCase()] || null
+})
+
+// Settings > Sandbox & Execution > "Auto-Run Skrip Aman" needs the Run tab
+// itself to be what's showing by default, not just the execution triggering
+// silently behind a Code tab nobody's looking at.
+const viewMode = ref(runnerKind.value && getSettings().codeExecutionMode === 'auto' ? 'run' : 'code') // 'code' | 'preview' | 'sql' | 'run'
+
+// The block above only catches a block that was ALREADY finished streaming
+// the moment this component was created. The far more common case is the
+// same component instance streaming in live (isStreaming true -> false) -
+// this instance persists across that transition (see WorkspaceChatPanel.vue's
+// segment rendering, keyed by index, not recreated per token), so the ref()
+// initializer above never re-runs on its own; this watcher is what actually
+// catches the transition for a block that was still streaming at mount time.
+watch(() => props.isStreaming, (streaming, wasStreaming) => {
+  if (streaming || !wasStreaming) return
+  if (runnerKind.value && getSettings().codeExecutionMode === 'auto') viewMode.value = 'run'
+})
 
 function hljsLanguage(fenceLanguage, filePath) {
   const map = {
@@ -99,6 +165,43 @@ async function copyCode() {
       </div>
 
       <div class="ws-code-actions">
+        <div v-if="isPreviewable || isSqlBlock || runnerKind" class="ws-view-toggle">
+          <button
+            class="ws-view-toggle-btn"
+            :class="{ 'ws-view-toggle-btn--active': viewMode === 'code' }"
+            title="Tampilkan kode"
+            @click="viewMode = 'code'"
+          >
+            <Code2 :size="12" />
+          </button>
+          <button
+            v-if="isPreviewable"
+            class="ws-view-toggle-btn"
+            :class="{ 'ws-view-toggle-btn--active': viewMode === 'preview' }"
+            title="Live Preview"
+            @click="viewMode = 'preview'"
+          >
+            <Eye :size="12" />
+          </button>
+          <button
+            v-if="isSqlBlock"
+            class="ws-view-toggle-btn"
+            :class="{ 'ws-view-toggle-btn--active': viewMode === 'sql' }"
+            title="SQL Playground"
+            @click="viewMode = 'sql'"
+          >
+            <Database :size="12" />
+          </button>
+          <button
+            v-if="runnerKind"
+            class="ws-view-toggle-btn"
+            :class="{ 'ws-view-toggle-btn--active': viewMode === 'run' }"
+            title="Jalankan kode"
+            @click="viewMode = 'run'"
+          >
+            <Play :size="12" />
+          </button>
+        </div>
         <button class="ws-code-btn" title="Salin kode" @click="copyCode">
           <Check v-if="copied" :size="12" />
           <Copy v-else :size="12" />
@@ -161,7 +264,16 @@ async function copyCode() {
     </template>
 
     <!-- Untargeted snippet (an example, a shell command): nothing to diff, so
-         it renders inline as ordinary code. -->
+         it renders inline as ordinary code - or, for a previewable HTML/SVG
+         block, a live sandboxed iframe once toggled. -->
+    <UniversalPreviewCanvas
+      v-else-if="isPreviewable && viewMode === 'preview'"
+      :code="code"
+      :kind="previewKind"
+      :typescript="previewIsTypescript"
+    />
+    <SqlPlayground v-else-if="isSqlBlock && viewMode === 'sql'" :source="code" />
+    <CodeRunnerOutput v-else-if="runnerKind && viewMode === 'run'" :source="code" :runner="runnerKind" />
     <pre v-else class="ws-code-pre"><code class="hljs" v-html="highlighted"></code></pre>
 
     <p v-if="!filePath && !isStreaming" class="ws-code-hint">
@@ -235,6 +347,31 @@ async function copyCode() {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+
+.ws-view-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--color-bg-input);
+}
+
+.ws-view-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.ws-view-toggle-btn--active {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
 }
 
 .ws-code-btn {

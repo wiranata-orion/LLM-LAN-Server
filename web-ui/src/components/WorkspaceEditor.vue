@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch, nextTick } from 'vue'
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import hljs from 'highlight.js/lib/common'
 import {
   Check,
@@ -10,9 +10,15 @@ import {
   AlertTriangle,
   Eye,
   ListPlus,
+  ShieldAlert,
+  CircleQuestionMark,
+  FlaskConical,
+  Wand2,
 } from 'lucide-vue-next'
 import { diffLines, collapseUnchanged } from '../services/diff.js'
 import { addSelectionAsContext } from '../services/workspaceStore.js'
+import { scanForVulnerabilities } from '../services/securityScanner.js'
+import { getSettings } from '../services/api.js'
 
 const props = defineProps({
   // { relPath, content, lines, truncated } or null when nothing is open.
@@ -26,7 +32,10 @@ const props = defineProps({
   errorMessage: { type: String, default: '' },
 })
 
-const emit = defineEmits(['accept', 'reject', 'close-file'])
+// 'context-action' carries { action, startLine, endLine, snippet } - see
+// handleContextAction below; WorkspaceView.vue turns it into a staged
+// context attachment plus a matching chat prompt.
+const emit = defineEmits(['accept', 'reject', 'close-file', 'context-action'])
 
 const showFullDiff = ref(false)
 const diffBodyRef = ref(null)
@@ -192,6 +201,102 @@ function handleCodeSelection() {
 
 watch(() => props.file?.relPath, clearSelectionAction)
 
+// ===== Security & Vulnerability Scanner (#9) - see securityScanner.js =====
+// Settings > Keamanan & Web's sensitivity: 'disabled' skips the scan
+// entirely, 'moderate' keeps only 'high' severity findings (hides the
+// noisier 'medium' ones like innerHTML/document.write), 'strict' shows
+// everything - the scanner's own original, unfiltered behavior.
+const securityFindings = computed(() => {
+  if (!props.file || isDiffMode.value) return []
+  const sensitivity = getSettings().securityScannerSensitivity || 'moderate'
+  if (sensitivity === 'disabled') return []
+  const findings = scanForVulnerabilities(props.file.content)
+  return sensitivity === 'moderate' ? findings.filter((f) => f.severity === 'high') : findings
+})
+
+const findingsByLine = computed(() => {
+  const map = new Map()
+  for (const finding of securityFindings.value) {
+    if (!map.has(finding.line)) map.set(finding.line, [])
+    map.get(finding.line).push(finding)
+  }
+  return map
+})
+
+const showSecurityPanel = ref(false)
+watch(() => props.file?.relPath, () => { showSecurityPanel.value = false })
+
+// ===== Smart Code Action Menu (#11) - right-click in the plain file view =====
+const contextMenu = ref(null) // { x, y, startLine, endLine, snippet } | null
+
+function closeContextMenu() {
+  contextMenu.value = null
+}
+
+/**
+ * Reuses whatever's already selected (see handleCodeSelection above) if the
+ * right-click happened inside that selection; otherwise falls back to just
+ * the single line under the cursor, so the menu is never left with nothing
+ * to act on.
+ */
+function handleContextMenu(event) {
+  const container = codeViewRef.value
+  if (!container) return
+
+  if (selectionAction.value) {
+    contextMenu.value = { x: event.clientX, y: event.clientY, ...selectionAction.value }
+    return
+  }
+
+  const row = event.target.closest?.('tr[data-line]')
+  if (!row) return
+  const line = Number(row.dataset.line)
+  const text = highlightedLines.value.length ? props.file.content.split('\n')[line - 1] || '' : ''
+  contextMenu.value = { x: event.clientX, y: event.clientY, startLine: line, endLine: line, snippet: text }
+}
+
+const CONTEXT_ACTION_PROMPTS = {
+  ask: (ref) => `Tolong jelaskan kode pada ${ref}.`,
+  test: (ref) => `Buatkan unit test untuk kode pada ${ref}.`,
+  refactor: (ref) => `Refactor kode pada ${ref} agar lebih bersih dan mengikuti best practice, tanpa mengubah perilakunya.`,
+}
+
+function handleContextAction(action) {
+  const menu = contextMenu.value
+  closeContextMenu()
+  if (!menu || !props.file) return
+
+  addSelectionAsContext({
+    relPath: props.file.relPath,
+    startLine: menu.startLine,
+    endLine: menu.endLine,
+    snippet: menu.snippet,
+  })
+
+  const ref = menu.startLine === menu.endLine
+    ? `baris ${menu.startLine} di ${props.file.relPath}`
+    : `baris ${menu.startLine}-${menu.endLine} di ${props.file.relPath}`
+  emit('context-action', { action, prompt: (CONTEXT_ACTION_PROMPTS[action] || CONTEXT_ACTION_PROMPTS.ask)(ref) })
+}
+
+function handleDocumentClick(event) {
+  if (contextMenu.value && !event.target.closest?.('.code-context-menu')) closeContextMenu()
+}
+
+function handleDocumentKeydown(event) {
+  if (event.key === 'Escape') closeContextMenu()
+}
+
+onMounted(() => {
+  document.addEventListener('click', handleDocumentClick)
+  document.addEventListener('keydown', handleDocumentKeydown)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleDocumentClick)
+  document.removeEventListener('keydown', handleDocumentKeydown)
+})
+
 function addCurrentSelectionToContext() {
   const action = selectionAction.value
   if (!action || !props.file) return
@@ -222,6 +327,16 @@ function addCurrentSelectionToContext() {
         </span>
         <span v-else-if="isDiffMode" class="editor-badge editor-badge--diff">Usulan perubahan</span>
         <span v-else-if="file?.truncated" class="editor-badge editor-badge--warn">Dipotong</span>
+        <button
+          v-if="securityFindings.length"
+          class="editor-badge editor-badge--danger"
+          type="button"
+          :title="`${securityFindings.length} potensi masalah keamanan ditemukan - klik untuk lihat detail`"
+          @click="showSecurityPanel = !showSecurityPanel"
+        >
+          <ShieldAlert :size="11" />
+          {{ securityFindings.length }}
+        </button>
       </div>
 
       <div class="editor-actions">
@@ -271,6 +386,15 @@ function addCurrentSelectionToContext() {
         </button>
       </div>
     </header>
+
+    <!-- Security & Vulnerability Scanner findings (#9) -->
+    <div v-if="showSecurityPanel && securityFindings.length" class="security-panel">
+      <div v-for="(finding, index) in securityFindings" :key="index" class="security-finding" :class="`security-finding--${finding.severity}`">
+        <ShieldAlert :size="12" />
+        <span class="security-finding-line">L{{ finding.line }}</span>
+        <span class="security-finding-message">{{ finding.message }}</span>
+      </div>
+    </div>
 
     <!-- Body -->
     <div ref="diffBodyRef" class="editor-body" @scroll="handleDiffScroll">
@@ -334,11 +458,31 @@ function addCurrentSelectionToContext() {
       </div>
 
       <!-- Plain file view -->
-      <div v-else-if="file" ref="codeViewRef" class="code-view" @mouseup="handleCodeSelection">
+      <div
+        v-else-if="file"
+        ref="codeViewRef"
+        class="code-view"
+        @mouseup="handleCodeSelection"
+        @contextmenu.prevent="handleContextMenu"
+      >
         <table class="code-table">
           <tbody>
-            <tr v-for="(line, index) in highlightedLines" :key="index" class="code-row" :data-line="index + 1">
-              <td class="code-gutter">{{ index + 1 }}</td>
+            <tr
+              v-for="(line, index) in highlightedLines"
+              :key="index"
+              class="code-row"
+              :class="{ 'code-row--flagged': findingsByLine.has(index + 1) }"
+              :data-line="index + 1"
+            >
+              <td class="code-gutter">
+                <ShieldAlert
+                  v-if="findingsByLine.has(index + 1)"
+                  :size="11"
+                  class="code-gutter-flag"
+                  :title="findingsByLine.get(index + 1).map((f) => f.message).join('\n')"
+                />
+                {{ index + 1 }}
+              </td>
               <!-- eslint-disable-next-line vue/no-v-html -- hljs output, built from file text that was escaped first -->
               <td class="code-line hljs" v-html="line || ' '"></td>
             </tr>
@@ -354,6 +498,23 @@ function addCurrentSelectionToContext() {
           <ListPlus :size="12" />
           <span>Tambah ke context ({{ selectionAction.startLine === selectionAction.endLine ? `baris ${selectionAction.startLine}` : `baris ${selectionAction.startLine}-${selectionAction.endLine}` }})</span>
         </button>
+
+        <!-- Smart Code Action Menu (#11) -->
+        <div
+          v-if="contextMenu"
+          class="code-context-menu glass"
+          :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        >
+          <button class="code-context-menu-item" type="button" @click="handleContextAction('ask')">
+            <CircleQuestionMark :size="13" /><span>Tanya AI soal baris ini</span>
+          </button>
+          <button class="code-context-menu-item" type="button" @click="handleContextAction('test')">
+            <FlaskConical :size="13" /><span>Generate Test</span>
+          </button>
+          <button class="code-context-menu-item" type="button" @click="handleContextAction('refactor')">
+            <Wand2 :size="13" /><span>Refactor</span>
+          </button>
+        </div>
       </div>
 
       <!-- Empty state -->
@@ -436,6 +597,69 @@ function addCurrentSelectionToContext() {
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid rgba(239, 68, 68, 0.35);
   color: var(--color-danger);
+}
+
+.editor-badge--danger {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: var(--color-danger);
+  cursor: pointer;
+  padding: 3px 8px;
+}
+
+.editor-badge--danger:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+/* ===== Security & Vulnerability Scanner (#9) ===== */
+.security-panel {
+  max-height: 160px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  flex-shrink: 0;
+}
+
+.security-finding {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.security-finding:last-child {
+  border-bottom: none;
+}
+
+.security-finding--high {
+  color: var(--color-danger, #ef4444);
+}
+
+.security-finding--medium {
+  color: #f59e0b;
+}
+
+.security-finding-line {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.security-finding-message {
+  color: var(--color-text-secondary);
+}
+
+.code-row--flagged .code-gutter {
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.code-gutter-flag {
+  color: var(--color-danger, #ef4444);
+  vertical-align: middle;
+  margin-right: 3px;
+  cursor: help;
 }
 
 .editor-actions {
@@ -622,6 +846,37 @@ function addCurrentSelectionToContext() {
 @keyframes selectionBtnIn {
   from { opacity: 0; transform: translateY(-100%) scale(0.92); }
   to { opacity: 1; transform: translateY(-100%) scale(1); }
+}
+
+/* ===== Smart Code Action Menu (#11) ===== */
+.code-context-menu {
+  position: fixed;
+  min-width: 190px;
+  padding: 4px;
+  border-radius: 9px;
+  z-index: 150;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.code-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 0.78rem;
+  font-family: var(--font-sans);
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.code-context-menu-item:hover {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-accent);
 }
 
 /* ===== Shared code/diff table ===== */

@@ -14,6 +14,13 @@ export interface StoredConversation {
   // relevant-memory search so it doesn't re-embed every past conversation on
   // every message. Reset to null whenever the conversation's messages change.
   embedding: number[] | null
+  // Message-branching tree (see web-ui's messageTree.js) - `messages` above
+  // is always just the *active* path; a branch created by editing or
+  // regenerating a past message lives only here. Opaque to the server - it
+  // only round-trips this, the web-ui owns the shape.
+  nodes?: Record<string, Record<string, unknown>>
+  rootChildrenIds?: string[]
+  activeRootId?: string | null
 }
 
 export interface StoredFolder {
@@ -113,6 +120,9 @@ export async function saveConversation(conversation: {
   // case whenever messages change. Pass an array only to persist a freshly
   // computed cache after a relevant-memory search embedded this conversation.
   embedding?: number[] | null
+  nodes?: Record<string, Record<string, unknown>>
+  rootChildrenIds?: string[]
+  activeRootId?: string | null
 }): Promise<void> {
   const dir = await conversationsDir()
   const existingFileName = await findConversationFileName(dir, conversation.conversationId)
@@ -127,6 +137,9 @@ export async function saveConversation(conversation: {
     updatedAt: new Date().toISOString(),
     messages: conversation.messages || [],
     embedding: conversation.embedding ?? null,
+    nodes: conversation.nodes,
+    rootChildrenIds: conversation.rootChildrenIds,
+    activeRootId: conversation.activeRootId,
   }
   await writeJsonFile(path.join(dir, fileName), record)
 }

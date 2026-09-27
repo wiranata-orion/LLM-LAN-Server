@@ -167,6 +167,7 @@ onUnmounted(() => {
           @accept="acceptCurrentProposal"
           @reject="rejectCurrentProposal"
           @close-file="closeWorkspaceFile"
+          @context-action="(payload) => handleSend(payload.prompt)"
         />
 
         <!-- Always mounted (rather than v-if'd away) so collapsing/expanding is a

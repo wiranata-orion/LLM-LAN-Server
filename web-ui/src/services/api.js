@@ -28,6 +28,67 @@ export const DEFAULT_SETTINGS = {
   // the base agent instruction on the server (see orchestrator.ts), not a
   // replacement for it, so identity/safety rules always still apply.
   customInstructions: '',
+  // Which persona preset last populated customInstructions above (see
+  // personas.js) - 'custom' means the user wrote/edited the text themselves,
+  // so picking the same preset again is a no-op instead of clobbering edits.
+  personaPreset: 'custom',
+  // User-added quick slash-command templates (Settings > Parameter AI >
+  // Template Prompt) - see promptTemplates.js, which merges these with a
+  // fixed set of built-ins (/refactor, /test, /doc, ...).
+  promptTemplates: [],
+  // VRAM Guard (Settings > Model): the user's own GPU's usable VRAM, in GB -
+  // compared against vramEstimator.js's estimate for the selected model +
+  // context size. Defaults to 8 (a common consumer card, e.g. the RX 580
+  // this app was originally tuned for) rather than guessing higher and
+  // silently under-warning on smaller hardware.
+  vramLimitGb: 8,
+
+  // ===== Settings > Suara & Audio - see speech.js =====
+  // BCP-47 tag used for BOTH STT (SpeechRecognition.lang) and TTS
+  // (SpeechSynthesisUtterance.lang) - one language setting drives both
+  // directions of voice interaction instead of two that could drift apart.
+  speechLang: 'id-ID',
+  // The exact SpeechSynthesisVoice.name last picked in Settings - voices
+  // themselves aren't serializable/stable across sessions, so only the name
+  // is persisted and re-resolved against speechSynthesis.getVoices() at
+  // speak-time (see speech.js's resolveVoice). May point at a voice that no
+  // longer exists (different browser/OS) - callers must handle that missing.
+  ttsVoiceName: '',
+  ttsRate: 1, // 0.5x-2.0x
+  ttsPitch: 1, // 0.5-1.5
+  ttsVolume: 100, // 0-100
+  // When true, MessageBubble.vue speaks a reply automatically the moment it
+  // finishes streaming, instead of only ever on an explicit click.
+  autoReadResponses: false,
+
+  // ===== Settings > Sandbox & Execution - see codeExecutionEngine.js =====
+  // These are consumed by the in-browser code runner (#28); stored here so
+  // the setting survives even before/independent of which specific runner
+  // (JS worker, Pyodide, ...) is active for a given block.
+  codeExecutionTimeoutMs: 5000,
+  // 'manual' = the user clicks Run; 'auto' = a block considered "safe" (see
+  // codeExecutionEngine.js) executes as soon as it finishes streaming in.
+  codeExecutionMode: 'manual',
+  pyodideMemoryLimitMb: 512,
+  sqlMemoryLimitMb: 256,
+  // Default tab for a fresh Live Preview / Artifacts canvas (#27) - 'desktop' | 'mobile' | 'tablet'.
+  defaultPreviewDevice: 'desktop',
+
+  // ===== Settings > Keamanan & Web =====
+  // 'strict' shows every securityScanner.js finding (current default
+  // behavior); 'moderate' hides 'medium' severity findings, keeping only
+  // 'high'; 'disabled' skips the scan entirely for that file.
+  securityScannerSensitivity: 'moderate',
+  // Redacts anything that looks like a hardcoded API key/secret/password
+  // (same pattern as securityScanner.js's hardcoded-secret rule) out of the
+  // user's own message text before it's sent to Ollama - see App.vue's
+  // sendMessage / secretMasking.js.
+  secretMaskingEnabled: true,
+  // Forwarded to the agent-server's fetch_url tool (#16) per chat request -
+  // see orchestrator.ts/web-fetch.ts - so a slow/hanging page a model tries
+  // to research doesn't stall a reply indefinitely.
+  webFetchTimeoutMs: 15000,
+  webFetchUserAgent: 'Mozilla/5.0 (compatible; XufruzLLM-ResearchAgent/1.0)',
   // Model Auto: when enabled, the model used per message is picked automatically
   // based on the detected task category instead of the manually selected model.
   autoModelEnabled: false,

@@ -98,6 +98,12 @@ export async function loadStoredConversations(model, { requireConnection = false
         messages: stored.messages,
         folderId: stored.folderId || null,
         createdAt: stored.createdAt || stored.updatedAt || new Date().toISOString(),
+        // Message-branching tree (see messageTree.js) - undefined for a
+        // conversation saved before this existed, which is fine:
+        // ensureTreeShape() rebuilds it from `messages` on first use.
+        nodes: stored.nodes,
+        rootChildrenIds: stored.rootChildrenIds,
+        activeRootId: stored.activeRootId,
       }))
       .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
   } catch (error) {
@@ -147,6 +153,11 @@ export async function saveConversation(conversation, model) {
       folderId: conversation.folderId || null,
       createdAt: conversation.createdAt || new Date().toISOString(),
       messages: conversation.messages || [],
+      // Message-branching tree (see messageTree.js) - `messages` above is
+      // only ever the active path; an inactive branch lives only here.
+      nodes: conversation.nodes,
+      rootChildrenIds: conversation.rootChildrenIds,
+      activeRootId: conversation.activeRootId,
     })
     return true
   } catch (error) {

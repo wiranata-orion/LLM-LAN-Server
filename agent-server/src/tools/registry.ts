@@ -25,4 +25,16 @@ export const toolDefinitions: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'fetch_url',
+      description: 'Fetch a public web page and return its title and main readable text (HTML tags, scripts, and navigation clutter already stripped out), for answering questions about a specific link the user provided or referenced. Only works for public http/https URLs, not local/private addresses.',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'The full http:// or https:// URL to fetch' } },
+        required: ['url'],
+      },
+    },
+  },
 ]

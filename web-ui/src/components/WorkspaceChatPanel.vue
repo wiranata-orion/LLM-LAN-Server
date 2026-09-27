@@ -19,6 +19,7 @@ import {
   Wrench,
   CircleQuestionMark,
   ListPlus,
+  BookOpen,
 } from 'lucide-vue-next'
 import WorkspaceCodeBlock from './WorkspaceCodeBlock.vue'
 import { parseWorkspaceReplySegments, deriveFallbackFilePath } from '../services/workspaceChatParsing.js'
@@ -247,6 +248,20 @@ function send() {
   nextTick(autoResize)
 }
 
+/**
+ * Auto-Generate Project Documentation (#12) - a "one-click" action, but not
+ * a separate feature underneath: it's a well-crafted prompt through this
+ * same chat, which already gathers workspace context via "@workspace" (see
+ * workspace-rag.ts on the agent-server) and already offers diff/accept for
+ * any file the model decides to write. No new pipeline needed - only the
+ * README.md request itself is new.
+ */
+function generateDocs() {
+  if (props.isGenerating) return
+  input.value = '@workspace Buatkan README.md yang terstruktur untuk proyek ini: ringkasan proyek, cara instalasi/setup, cara menjalankan, dan gambaran arsitektur/struktur folder utama. Tulis ke file README.md di root proyek.'
+  send()
+}
+
 function autoResize() {
   const element = textareaRef.value
   if (!element) return
@@ -368,6 +383,15 @@ function reasonLabel(reason) {
         <Crosshair :size="11" />
         {{ activeFilePath.split('/').pop() }}
       </span>
+
+      <button
+        class="ws-chat-history-btn"
+        title="Auto-Generate Docs: minta AI menulis README.md berdasarkan isi proyek ini"
+        :disabled="isGenerating"
+        @click="generateDocs"
+      >
+        <BookOpen :size="15" />
+      </button>
 
       <div ref="historyWrapperRef" class="ws-history-wrapper">
         <button class="ws-chat-history-btn" title="Riwayat chat" @click="toggleHistoryMenu">

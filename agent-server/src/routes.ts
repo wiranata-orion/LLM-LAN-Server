@@ -81,6 +81,10 @@ const chatSchema = z.object({
   // the base agentInstruction (see orchestrator.ts), not a replacement for
   // it, so the identity/safety rules there always still apply.
   customInstructions: z.string().max(4000).optional(),
+  // Settings > Keamanan & Web - forwarded to the fetch_url tool (see
+  // web-fetch.ts) for this request only, instead of a fixed backend default.
+  webFetchTimeoutMs: z.number().int().positive().max(120_000).optional(),
+  webFetchUserAgent: z.string().max(300).optional(),
   messages: z.array(z.object({
     role: z.enum(['system', 'user', 'assistant', 'tool']),
     content: z.string(),
@@ -112,6 +116,13 @@ const conversationSaveSchema = z.object({
   createdAt: z.string().optional(),
   messages: z.array(z.record(z.unknown())),
   embedding: z.array(z.number()).nullable().optional(),
+  // Message-branching tree (see web-ui's messageTree.js) - `messages` above
+  // is always just the *active* path materialized as a flat array, kept for
+  // backward compatibility; a branch created by editing or regenerating a
+  // past message lives only here.
+  nodes: z.record(z.string(), z.record(z.unknown())).optional(),
+  rootChildrenIds: z.array(z.string()).optional(),
+  activeRootId: z.string().nullable().optional(),
 })
 
 const folderSchema = z.object({
@@ -354,6 +365,7 @@ export function createRouter(context: AppContext): Router {
             },
             body.useContextRetrieval,
             body.customInstructions,
+            { timeoutMs: body.webFetchTimeoutMs, userAgent: body.webFetchUserAgent },
           )
           response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId, performance: result.performance })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)
@@ -381,6 +393,7 @@ export function createRouter(context: AppContext): Router {
         undefined,
         body.useContextRetrieval,
         body.customInstructions,
+        { timeoutMs: body.webFetchTimeoutMs, userAgent: body.webFetchUserAgent },
       )
       response.json({
         ok: true,
