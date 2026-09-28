@@ -1,6 +1,8 @@
 <script setup>
-import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
-import { Send, Square, Plus, Paperclip, FileText, X, Image as ImageIcon } from 'lucide-vue-next'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { Send, Square, Plus, Paperclip, FileText, X, Image as ImageIcon, Slash, Mic } from 'lucide-vue-next'
+import { getPromptTemplates } from '../services/promptTemplates.js'
+import { isSttSupported, createSpeechRecognizer } from '../services/speech.js'
 
 const props = defineProps({
   disabled: {
@@ -57,9 +59,78 @@ function handleClickOutside(e) {
   if (!e.target.closest('.add-menu-wrapper')) {
     showAddMenu.value = false
   }
+  if (!e.target.closest('.slash-menu') && !e.target.closest('#chat-input')) {
+    slashQuery.value = null
+  }
+}
+
+// ===== "/" quick-template picker (#8) - see promptTemplates.js =====
+// null = not composing a command; a string (possibly empty) = the partial
+// trigger typed so far. Unlike WorkspaceChatPanel's "@" mentions, a slash
+// command only ever means anything when it's the ENTIRE message typed so
+// far (position 0 to the end) - so this only needs the input's full value,
+// never the caret position.
+const slashQuery = ref(null)
+const slashIndex = ref(0)
+
+const slashMatchList = computed(() => {
+  if (slashQuery.value === null) return []
+  const query = slashQuery.value.toLowerCase()
+  return getPromptTemplates()
+    .filter((template) => !query || template.trigger.toLowerCase().includes(query))
+    .slice(0, 8)
+})
+
+function updateSlashState() {
+  const match = input.value.match(/^\/([a-zA-Z0-9_-]*)$/)
+  const nextQuery = match ? match[1] : null
+  if (nextQuery !== slashQuery.value) slashIndex.value = 0
+  slashQuery.value = nextQuery
+}
+
+watch(input, updateSlashState)
+
+function moveSlashSelection(delta) {
+  const lastIndex = slashMatchList.value.length - 1
+  slashIndex.value = Math.min(lastIndex, Math.max(0, slashIndex.value + delta))
+}
+
+function applySlashTemplate(template) {
+  input.value = template.text
+  slashQuery.value = null
+  nextTick(() => {
+    autoResize()
+    const el = textareaRef.value
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  })
 }
 
 function handleKeydown(e) {
+  if (slashQuery.value !== null && slashMatchList.value.length) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      moveSlashSelection(1)
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      moveSlashSelection(-1)
+      return
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      applySlashTemplate(slashMatchList.value[slashIndex.value])
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      slashQuery.value = null
+      return
+    }
+  }
+
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     sendMessage()
@@ -135,6 +206,46 @@ function stopGeneration() {
   emit('stop')
 }
 
+// ===== Speech-to-text (#1) - see services/speech.js =====
+const sttSupported = isSttSupported()
+const isListening = ref(false)
+let recognizer = null
+// The composer's own text before this listening session started, plus
+// whatever's been finalized so far within it - onResult below always
+// rewrites input.value as (base + finalized + latest interim), rather than
+// appending piecemeal, since SpeechRecognition re-sends an in-progress
+// phrase's interim transcript repeatedly until it finalizes.
+let sttBaseText = ''
+let sttFinalizedText = ''
+
+function toggleListening() {
+  if (isListening.value) {
+    recognizer?.stop()
+    return
+  }
+  recognizer = createSpeechRecognizer({
+    onResult: (transcript, isFinal) => {
+      if (isFinal) sttFinalizedText += transcript
+      input.value = `${sttBaseText}${sttFinalizedText}${isFinal ? '' : transcript}`.trim()
+    },
+    onEnd: () => {
+      isListening.value = false
+    },
+    onError: () => {
+      isListening.value = false
+    },
+  })
+  if (!recognizer) return
+  sttBaseText = input.value ? `${input.value} ` : ''
+  sttFinalizedText = ''
+  isListening.value = true
+  recognizer.start()
+}
+
+onUnmounted(() => {
+  recognizer?.stop()
+})
+
 watch(input, () => {
   nextTick(autoResize)
 })
@@ -183,6 +294,22 @@ defineExpose({ focusInput, restoreDraft })
           <X :size="12" />
         </button>
       </div>
+    </div>
+
+    <!-- "/" quick-template picker (#8) -->
+    <div v-if="slashQuery !== null && slashMatchList.length" class="slash-menu glass">
+      <button
+        v-for="(template, index) in slashMatchList"
+        :key="template.trigger"
+        class="slash-menu-item"
+        :class="{ 'slash-menu-item--active': index === slashIndex }"
+        type="button"
+        @mousedown.prevent="applySlashTemplate(template)"
+      >
+        <Slash :size="12" class="slash-menu-icon" />
+        <span class="slash-menu-trigger">/{{ template.trigger }}</span>
+        <span class="slash-menu-label">{{ template.label }}</span>
+      </button>
     </div>
 
     <div class="chat-input-wrapper glass glow-accent">
@@ -243,6 +370,16 @@ defineExpose({ focusInput, restoreDraft })
 
       <div class="chat-input-actions">
         <button
+          v-if="sttSupported"
+          class="mic-btn"
+          :class="{ 'mic-btn--listening': isListening }"
+          type="button"
+          :title="isListening ? 'Berhenti merekam' : 'Bicara untuk mengetik (STT)'"
+          @click="toggleListening"
+        >
+          <Mic :size="16" />
+        </button>
+        <button
           v-if="isGenerating"
           @click="stopGeneration"
           class="send-btn stop-btn"
@@ -266,17 +403,73 @@ defineExpose({ focusInput, restoreDraft })
     </div>
 
     <p class="chat-input-hint">
-      <kbd>Enter</kbd> kirim · <kbd>Shift+Enter</kbd> baris baru
+      <kbd>/</kbd> template · <kbd>Enter</kbd> kirim · <kbd>Shift+Enter</kbd> baris baru
     </p>
   </div>
 </template>
 
 <style scoped>
 .chat-input-container {
+  position: relative;
   padding: 0 24px 20px;
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
+}
+
+/* "/" quick-template picker */
+.slash-menu {
+  position: absolute;
+  bottom: calc(100% - 12px);
+  left: 24px;
+  right: 24px;
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: 10px;
+  padding: 5px;
+  z-index: 40;
+}
+
+.slash-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  font-family: var(--font-sans);
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.slash-menu-icon {
+  flex-shrink: 0;
+  color: var(--color-text-accent);
+}
+
+.slash-menu-trigger {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--color-text-accent);
+  flex-shrink: 0;
+}
+
+.slash-menu-label {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-menu-item:hover,
+.slash-menu-item--active {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 
 /* Attached Files Preview Row */
@@ -486,7 +679,38 @@ defineExpose({ focusInput, restoreDraft })
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   height: 36px;
+}
+
+.mic-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  border: none;
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.mic-btn:hover {
+  color: var(--color-text-accent);
+  background: var(--color-accent-subtle);
+}
+
+.mic-btn--listening {
+  background: var(--color-danger, #ef4444);
+  color: white;
+  animation: pulse 1.5s infinite;
+}
+
+.mic-btn--listening:hover {
+  background: #dc2626;
+  color: white;
 }
 
 .send-btn {

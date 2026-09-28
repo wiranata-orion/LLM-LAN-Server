@@ -1,15 +1,28 @@
 <script setup>
-import { computed } from 'vue'
-import { Bot, User, Gauge } from 'lucide-vue-next'
-import hljs from 'highlight.js/lib/common'
-import MarkdownIt from 'markdown-it'
-import { formatDuration, perfSummary, perfTooltip } from '../services/api.js'
+import { computed, nextTick, ref, watch } from 'vue'
+import { Bot, User, Gauge, Pencil, ChevronLeft, ChevronRight, Pin, Volume2, VolumeX } from 'lucide-vue-next'
+import { isNotePinned } from '../services/pinnedNotes.js'
+import { isTtsSupported, stripForSpeech, speak, stopSpeaking, speakingText } from '../services/speech.js'
+import { formatDuration, perfSummary, perfTooltip, getSettings } from '../services/api.js'
+import { renderMarkdown } from '../services/markdownRenderer.js'
+import { parseClarificationSegments } from '../services/clarificationParser.js'
+import { parseMermaidSegments } from '../services/mermaidParser.js'
+import { parseFlashcardSegments } from '../services/flashcardParser.js'
+import { parseMindMapSegments } from '../services/mindMapParser.js'
+import { parseDecisionMatrixSegments } from '../services/decisionMatrixParser.js'
+import ClarificationCard from './ClarificationCard.vue'
+import MermaidDiagram from './MermaidDiagram.vue'
+import FlashcardDeck from './FlashcardDeck.vue'
+import MindMap from './MindMap.vue'
+import DecisionMatrix from './DecisionMatrix.vue'
 
 const props = defineProps({
   message: {
     type: Object,
     required: true,
-    // { role: 'user' | 'assistant', content: string }
+    // { role: 'user' | 'assistant', content: string, siblingIndex?, siblingCount? }
+    // siblingIndex/siblingCount are written by messageTree.js's syncActivePath()
+    // whenever this message has alternate edited/regenerated versions.
   },
   isGenerating: {
     type: Boolean,
@@ -22,261 +35,141 @@ const props = defineProps({
     type: Number,
     default: 0,
   },
+  // The active conversation's id (see App.vue) - only used to check whether
+  // THIS message is already pinned (see pinnedNotes.js's isNotePinned),
+  // scoped per conversation so the exact same reply text in two different
+  // chats is tracked as two separate pins.
+  conversationId: {
+    type: String,
+    default: '',
+  },
 })
+
+// 'edit' carries the new text (String); the caller (App.vue's
+// handleEditMessage) turns it into a new branch and regenerates a reply.
+// 'switch-branch' carries -1/+1 for the "‹ ›" sibling-version control.
+// 'clarify-submit' carries a ClarificationCard's { clarificationId, answers,
+// summaryText } payload - see handleClarifySubmit below.
+// 'pin' carries nothing - App.vue's handlePinMessage reads the content off
+// this same message via the index ChatView.vue already tracks.
+const emit = defineEmits(['edit', 'switch-branch', 'clarify-submit', 'pin'])
 
 const isUser = computed(() => props.message.role === 'user')
 const isAssistant = computed(() => props.message.role === 'assistant')
 const isThinking = computed(() => isAssistant.value && props.isGenerating && !props.message.content)
 const elapsedLabel = computed(() => formatDuration(props.elapsedSeconds * 1000))
+
+// ---- Inline edit (user messages only) ----
+const isEditing = ref(false)
+const editDraft = ref('')
+const editTextareaRef = ref(null)
+
+function startEdit() {
+  if (props.isGenerating) return
+  editDraft.value = props.message.content
+  isEditing.value = true
+  nextTick(() => editTextareaRef.value?.focus())
+}
+
+function cancelEdit() {
+  isEditing.value = false
+}
+
+function submitEdit() {
+  const trimmed = editDraft.value.trim()
+  if (!trimmed) return
+  isEditing.value = false
+  emit('edit', trimmed)
+}
+
+function handleEditKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    submitEdit()
+  } else if (event.key === 'Escape') {
+    cancelEdit()
+  }
+}
+
+// ---- Branch switcher (either role, once a sibling version exists) ----
+const siblingInfo = computed(() => ({
+  index: props.message.siblingIndex ?? 0,
+  total: props.message.siblingCount || 1,
+}))
+const hasSiblings = computed(() => siblingInfo.value.total > 1)
+
+function switchBranch(delta) {
+  emit('switch-branch', delta)
+}
 // Always-visible (unlike ChatView.vue's fuller meta row, which only shows on
 // hover) - discoverability matters more here than completeness, so this is
 // just the headline number with the full breakdown in the tooltip.
 const perfLabel = computed(() => perfSummary(props.message.performance))
 const perfLabelTitle = computed(() => perfTooltip(props.message.performance))
 
-// ---- Markdown rendering ----
-// CommonMark via markdown-it (already a project dependency) instead of a
-// hand-rolled regex parser: it correctly handles nested lists, loose/tight
-// paragraphs, tables without a trailing "|", headings immediately followed by
-// text, and - importantly for streaming - an unclosed ``` fence just extends
-// to the end of input instead of leaking raw backticks into the page.
-const md = new MarkdownIt({
-  html: false, // never render raw HTML from model output - avoids script/style injection via prompt injection or RAG content
-  linkify: true,
-  breaks: true, // a single newline becomes <br>, matching how chat replies are usually written
-  typographer: false,
+// ---- Interactive widgets (clarify, mermaid, flashcards/quiz, mindmap, decision matrix) ----
+// v-html can't run a live component, so an assistant reply is split into
+// ordered text/widget segments here - each 'text' segment still goes through
+// the normal renderMarkdown() below; every other segment type mounts a real
+// component instead. The parsers are chained rather than merged into one:
+// each one only ever looks at the 'text' segments the previous one
+// produced, so e.g. a ```mermaid block can never be misread as part of a
+// ```clarify block or vice versa - fences don't nest, and each parser only
+// has to know about its own tag. Recomputed on every token while streaming,
+// same as renderMarkdown() already was - each parser is a single cheap pass
+// with no backtracking.
+const WIDGET_PARSERS = [parseClarificationSegments, parseMermaidSegments, parseFlashcardSegments, parseMindMapSegments, parseDecisionMatrixSegments]
+
+const assistantSegments = computed(() => {
+  if (!isAssistant.value) return []
+  return WIDGET_PARSERS.reduce(
+    (segments, parse) => segments.flatMap((segment) => (segment.type === 'text' ? parse(segment.content) : [segment])),
+    [{ type: 'text', content: props.message.content }],
+  )
 })
 
-// Every link (explicit [text](url) or autolinked bare URL) opens in a new tab
-// safely, without exposing window.opener to the target page.
-const defaultLinkOpen = md.renderer.rules.link_open || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options))
-md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-  const token = tokens[idx]
-  token.attrSet('target', '_blank')
-  token.attrSet('rel', 'noopener noreferrer')
-  return defaultLinkOpen(tokens, idx, options, env, self)
+/** Forwarded up as-is; App.vue's handleClarifySubmit turns summaryText into the next user message. */
+function handleClarifySubmit(payload) {
+  emit('clarify-submit', payload)
 }
 
-// Custom fenced-code rendering: syntax highlighting plus the copy-button card,
-// instead of markdown-it's plain <pre><code>.
-md.renderer.rules.fence = (tokens, idx) => {
-  const token = tokens[idx]
-  const lang = (token.info || '').trim().split(/\s+/)[0]
-  return createCodeBlock(lang, token.content)
+// ---- Pin / bookmark (assistant messages only - see pinnedNotes.js) ----
+const isPinned = computed(() => (
+  isAssistant.value && !!props.message.content && isNotePinned(props.conversationId, props.message.content)
+))
+
+function togglePin() {
+  if (isPinned.value) return // unpinning happens from the Key Notes drawer, not here - avoids a second confirmation step for a destructive action
+  emit('pin')
 }
 
-const MATH_BLOCK_TOKEN = 'XUFRUZMATHBLOCKPLACEHOLDERx'
-const MATH_INLINE_TOKEN = 'XUFRUZMATHINLINEPLACEHOLDERx'
-const CODE_FENCE_TOKEN = 'XUFRUZCODEFENCEPLACEHOLDERx'
+// ---- Text-to-speech (#1) - see services/speech.js ----
+const ttsSupported = isTtsSupported()
+const strippedForSpeech = computed(() => stripForSpeech(props.message.content))
+// Derived from the one shared speakingText ref rather than local state - see
+// speech.js for why (speechSynthesis is a single global resource).
+const isSpeakingThis = computed(() => !!strippedForSpeech.value && speakingText.value === strippedForSpeech.value)
 
-// Hides fenced code blocks (closed or, mid-stream, still open) behind a
-// placeholder line so the math substitution below never rewrites a literal
-// "$" inside code (e.g. `echo $HOME`, "$5"). Restored verbatim before
-// markdown-it runs, so its own fence parsing (see md.renderer.rules.fence)
-// still sees the real ``` syntax.
-//
-// A closing fence must use the same character and be at least as long as the
-// one that opened it - the same rule CommonMark itself uses. Without the
-// length check, a fence nested inside the content (e.g. the model shows the
-// contents of a markdown file that itself contains ``` example blocks) closed
-// the outer block at the first nested ``` it hit, and everything after that
-// point rendered with prose/code roles flipped for the rest of the message.
-function protectCodeFences(text) {
-  const lines = text.split('\n')
-  const fences = []
-  const output = []
-  let fenceMarker = null
-  let fenceLength = 0
-  let current = []
-
-  for (const line of lines) {
-    if (!fenceMarker) {
-      const open = line.match(/^ {0,3}(`{3,}|~{3,})/)
-      if (open) {
-        fenceMarker = open[1][0]
-        fenceLength = open[1].length
-        current = [line]
-        continue
-      }
-      output.push(line)
-      continue
-    }
-
-    current.push(line)
-    const closePattern = fenceMarker === '`' ? /^ {0,3}(`{3,})\s*$/ : /^ {0,3}(~{3,})\s*$/
-    const closeMatch = line.match(closePattern)
-    if (closeMatch && closeMatch[1].length >= fenceLength) {
-      fences.push(current.join('\n'))
-      output.push(`${CODE_FENCE_TOKEN}${fences.length - 1}${CODE_FENCE_TOKEN}`)
-      fenceMarker = null
-      current = []
-    }
+function toggleSpeak() {
+  if (isSpeakingThis.value) {
+    stopSpeaking()
+    return
   }
-  // Streaming: the fence hasn't closed yet - protect what's there so far.
-  if (fenceMarker) {
-    fences.push(current.join('\n'))
-    output.push(`${CODE_FENCE_TOKEN}${fences.length - 1}${CODE_FENCE_TOKEN}`)
-  }
-
-  return { text: output.join('\n'), fences }
+  if (!strippedForSpeech.value) return
+  speak(strippedForSpeech.value)
 }
 
-function renderMarkdown(text) {
-  if (!text) return ''
+// Settings > Suara & Audio > "Baca Otomatis Balasan AI" - speaks a reply the
+// moment it finishes streaming, without waiting for a click. Watches the
+// isGenerating->false transition rather than message.content directly, so
+// this only fires once per finished reply instead of on every token while
+// streaming (message.content changes constantly during that).
+watch(() => props.isGenerating, (generating, wasGenerating) => {
+  if (generating || !wasGenerating || !isAssistant.value || !ttsSupported) return
+  if (!getSettings().autoReadResponses) return
+  if (strippedForSpeech.value) speak(strippedForSpeech.value)
+})
 
-  const { text: withoutCode, fences: codeFences } = protectCodeFences(text)
-
-  // ---- LaTeX math: protect from markdown-it first (e.g. "_" in math would
-  // otherwise be read as emphasis), restore the rendered formulas afterward.
-  const mathBlocks = []
-  const mathInlines = []
-  let source = withoutCode
-
-  // Force display math onto its own paragraph even when the model wrote it
-  // mid-sentence: substituting a block-level <div> into inline text otherwise
-  // leaves a <div> nested inside a <p> (invalid HTML that some browsers
-  // recover from by leaving the paragraph unclosed).
-  source = source.replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => {
-    mathBlocks.push(formatMath(math.trim()))
-    return `\n\n${MATH_BLOCK_TOKEN}${mathBlocks.length - 1}${MATH_BLOCK_TOKEN}\n\n`
-  })
-  source = source.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => {
-    mathBlocks.push(formatMath(math.trim()))
-    return `\n\n${MATH_BLOCK_TOKEN}${mathBlocks.length - 1}${MATH_BLOCK_TOKEN}\n\n`
-  })
-  source = source.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
-    mathInlines.push(formatMath(math.trim()))
-    return `${MATH_INLINE_TOKEN}${mathInlines.length - 1}${MATH_INLINE_TOKEN}`
-  })
-  source = source.replace(/\\\(([^\n]*?)\\\)/g, (_, math) => {
-    mathInlines.push(formatMath(math.trim()))
-    return `${MATH_INLINE_TOKEN}${mathInlines.length - 1}${MATH_INLINE_TOKEN}`
-  })
-
-  // Restore the real fence syntax now, so markdown-it parses and highlights it.
-  source = source.replace(new RegExp(`${CODE_FENCE_TOKEN}(\\d+)${CODE_FENCE_TOKEN}`, 'g'), (_, i) => codeFences[Number(i)])
-
-  let html = md.render(source)
-
-  const blockTokenRegex = new RegExp(`(?:<p>)?${MATH_BLOCK_TOKEN}(\\d+)${MATH_BLOCK_TOKEN}(?:</p>)?`, 'g')
-  html = html.replace(blockTokenRegex, (_, i) => `<div class="math-block">${mathBlocks[Number(i)]}</div>`)
-  const inlineTokenRegex = new RegExp(`${MATH_INLINE_TOKEN}(\\d+)${MATH_INLINE_TOKEN}`, 'g')
-  html = html.replace(inlineTokenRegex, (_, i) => `<span class="math-inline">${mathInlines[Number(i)]}</span>`)
-
-  return html
-}
-
-function createCodeBlock(lang, code) {
-  const cleanCode = code.replace(/\n$/, '')
-  const safeCode = escapeHtml(cleanCode)
-  let highlightedCode = safeCode
-
-  if (lang && hljs.getLanguage(lang)) {
-    highlightedCode = hljs.highlight(cleanCode, {
-      language: lang,
-      ignoreIllegals: true,
-    }).value
-  }
-
-  return `<div class="code-card"><div class="code-header"><span class="code-lang">${lang || 'code'}</span><button class="copy-code-btn" data-code="${safeCode.replace(/"/g, '&quot;')}" onclick="copyCode(this.dataset.code)">Copy</button></div><pre><code class="language-${lang || 'plaintext'} hljs">${highlightedCode}</code></pre></div>`
-}
-
-function escapeHtml(value) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-}
-
-// ---- LaTeX math formatter ----
-function formatMath(latex) {
-  let result = latex
-  // Common font commands used for vectors and named operators.
-  result = result.replace(/\\mathbf\{([^}]+)\}/g, '<strong class="math-bold">$1</strong>')
-  result = result.replace(/\\mathrm\{([^}]+)\}/g, '<span class="math-roman">$1</span>')
-  // Fractions: \frac{a}{b} → a/b styled
-  result = result.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g,
-    '<span class="math-frac"><span class="math-num">$1</span><span class="math-den">$2</span></span>')
-  // Superscript: x^{2} or x^2
-  result = result.replace(/\^{([^}]+)}/g, '<sup>$1</sup>')
-  result = result.replace(/\^(\w)/g, '<sup>$1</sup>')
-  // Subscript: x_{i} or x_i
-  result = result.replace(/_{([^}]+)}/g, '<sub>$1</sub>')
-  result = result.replace(/_(\w)/g, '<sub>$1</sub>')
-  // Square root: \sqrt{x}
-  result = result.replace(/\\sqrt\{([^}]+)\}/g, '√($1)')
-  // Greek letters
-  const greeks = {
-    alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε',
-    zeta: 'ζ', eta: 'η', theta: 'θ', iota: 'ι', kappa: 'κ',
-    lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π',
-    rho: 'ρ', sigma: 'σ', tau: 'τ', upsilon: 'υ', phi: 'φ',
-    chi: 'χ', psi: 'ψ', omega: 'ω',
-    Alpha: 'Α', Beta: 'Β', Gamma: 'Γ', Delta: 'Δ', Epsilon: 'Ε',
-    Zeta: 'Ζ', Eta: 'Η', Theta: 'Θ', Iota: 'Ι', Kappa: 'Κ',
-    Lambda: 'Λ', Mu: 'Μ', Nu: 'Ν', Xi: 'Ξ', Pi: 'Π',
-    Rho: 'Ρ', Sigma: 'Σ', Tau: 'Τ', Upsilon: 'Υ', Phi: 'Φ',
-    Chi: 'Χ', Psi: 'Ψ', Omega: 'Ω',
-  }
-  for (const [name, symbol] of Object.entries(greeks)) {
-    result = result.replace(new RegExp(`\\\\${name}\\b`, 'g'), symbol)
-  }
-  // Math operators
-  result = result.replace(/\\times/g, '×')
-  result = result.replace(/\\div/g, '÷')
-  result = result.replace(/\\pm/g, '±')
-  result = result.replace(/\\mp/g, '∓')
-  result = result.replace(/\\cdot/g, '·')
-  result = result.replace(/\\leq/g, '≤')
-  result = result.replace(/\\geq/g, '≥')
-  result = result.replace(/\\neq/g, '≠')
-  result = result.replace(/\\approx/g, '≈')
-  result = result.replace(/\\infty/g, '∞')
-  result = result.replace(/\\sum/g, '∑')
-  result = result.replace(/\\prod/g, '∏')
-  result = result.replace(/\\int/g, '∫')
-  result = result.replace(/\\partial/g, '∂')
-  result = result.replace(/\\nabla/g, '∇')
-  result = result.replace(/\\forall/g, '∀')
-  result = result.replace(/\\exists/g, '∃')
-  result = result.replace(/\\in/g, '∈')
-  result = result.replace(/\\notin/g, '∉')
-  result = result.replace(/\\subset/g, '⊂')
-  result = result.replace(/\\supset/g, '⊃')
-  result = result.replace(/\\cup/g, '∪')
-  result = result.replace(/\\cap/g, '∩')
-  result = result.replace(/\\rightarrow/g, '→')
-  result = result.replace(/\\leftarrow/g, '←')
-  result = result.replace(/\\Rightarrow/g, '⇒')
-  result = result.replace(/\\Leftarrow/g, '⇐')
-  result = result.replace(/\\therefore/g, '∴')
-  result = result.replace(/\\because/g, '∵')
-  // Brackets
-  result = result.replace(/\\left\(/g, '(')
-  result = result.replace(/\\right\)/g, ')')
-  result = result.replace(/\\left\[/g, '[')
-  result = result.replace(/\\right\]/g, ']')
-  result = result.replace(/\\{/g, '{')
-  result = result.replace(/\\}/g, '}')
-  // Text inside math
-  result = result.replace(/\\text\{([^}]+)\}/g, '<span class="math-text">$1</span>')
-  // Clean remaining backslashes from unknown commands
-  result = result.replace(/\\([a-zA-Z]+)/g, '$1')
-  return result
-}
-
-// Copy code block content
-async function copyCode(code) {
-  try {
-    await navigator.clipboard.writeText(code)
-    // optional visual feedback could be added here
-    console.log('Code copied')
-  } catch (err) {
-    console.error('Copy code failed:', err)
-  }
-}
-
-window.copyCode = copyCode
 </script>
 
 <template>
@@ -299,7 +192,7 @@ window.copyCode = copyCode
         </span>
       </div>
 
-      <div v-if="isUser" class="message-bubble message-bubble--user">
+      <div v-if="isUser && !isEditing" class="message-bubble message-bubble--user">
         <div v-if="message.images?.length" class="message-images-row">
           <img
             v-for="(image, idx) in message.images"
@@ -312,15 +205,86 @@ window.copyCode = copyCode
         {{ message.content }}
       </div>
 
+      <!-- Inline edit mode - replaces the plain bubble above while active. -->
+      <div v-else-if="isUser && isEditing" class="message-edit-box">
+        <textarea
+          ref="editTextareaRef"
+          v-model="editDraft"
+          class="message-edit-textarea"
+          rows="2"
+          @keydown="handleEditKeydown"
+        ></textarea>
+        <div class="message-edit-actions">
+          <button class="message-edit-btn message-edit-btn--cancel" type="button" @click="cancelEdit">Batal</button>
+          <button
+            class="message-edit-btn message-edit-btn--save"
+            type="button"
+            :disabled="!editDraft.trim()"
+            @click="submitEdit"
+          >
+            Simpan &amp; Kirim Ulang
+          </button>
+        </div>
+      </div>
+
       <div v-if="isThinking" class="thinking-indicator" aria-label="Thinking">
         <span>Thinking</span><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
       </div>
 
-      <div
-        v-else-if="isAssistant"
-        class="message-bubble message-bubble--assistant markdown-body"
-        v-html="renderMarkdown(message.content)"
-      ></div>
+      <div v-else-if="isAssistant" class="message-bubble message-bubble--assistant">
+        <template v-for="(segment, index) in assistantSegments" :key="index">
+          <div v-if="segment.type === 'text'" class="markdown-body" v-html="renderMarkdown(segment.content)"></div>
+          <ClarificationCard v-else-if="segment.type === 'clarify'" :schema="segment.schema" @submit="handleClarifySubmit" />
+          <MermaidDiagram v-else-if="segment.type === 'mermaid'" :source="segment.source" />
+          <FlashcardDeck v-else-if="segment.type === 'flashcards'" :schema="segment.schema" />
+          <MindMap v-else-if="segment.type === 'mindmap'" :schema="segment.schema" />
+          <DecisionMatrix v-else-if="segment.type === 'decision-matrix'" :schema="segment.schema" />
+        </template>
+      </div>
+
+      <!-- Edit trigger (user only) + branch switcher (either role, once an
+           edited/regenerated sibling version exists). -->
+      <div v-if="!isEditing && (isUser || isAssistant) && (isUser || !isThinking) && (isUser || hasSiblings || message.content)" class="message-footer-row">
+        <button
+          v-if="isUser"
+          class="message-edit-trigger"
+          type="button"
+          title="Edit pesan ini"
+          @click="startEdit"
+        >
+          <Pencil :size="12" />
+        </button>
+        <button
+          v-if="isAssistant && message.content"
+          class="message-pin-trigger"
+          :class="{ 'message-pin-trigger--pinned': isPinned }"
+          type="button"
+          :title="isPinned ? 'Sudah disematkan (lepas dari Key Notes)' : 'Sematkan ke Key Notes'"
+          @click="togglePin"
+        >
+          <Pin :size="12" :fill="isPinned ? 'currentColor' : 'none'" />
+        </button>
+        <button
+          v-if="isAssistant && ttsSupported && message.content"
+          class="message-pin-trigger"
+          :class="{ 'message-pin-trigger--pinned': isSpeakingThis }"
+          type="button"
+          :title="isSpeakingThis ? 'Berhenti membaca' : 'Bacakan balasan ini'"
+          @click="toggleSpeak"
+        >
+          <VolumeX v-if="isSpeakingThis" :size="12" />
+          <Volume2 v-else :size="12" />
+        </button>
+        <div v-if="hasSiblings" class="branch-switcher" title="Versi lain dari pesan ini">
+          <button class="branch-switcher-btn" type="button" title="Versi sebelumnya" @click="switchBranch(-1)">
+            <ChevronLeft :size="12" />
+          </button>
+          <span class="branch-switcher-label">{{ siblingInfo.index + 1 }}/{{ siblingInfo.total }}</span>
+          <button class="branch-switcher-btn" type="button" title="Versi selanjutnya" @click="switchBranch(1)">
+            <ChevronRight :size="12" />
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -471,6 +435,172 @@ window.copyCode = copyCode
 
 .message-bubble--assistant {
   color: var(--color-ai-bubble-text);
+}
+
+/* ===== Inline message edit ===== */
+.message-edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.message-row--user .message-edit-box {
+  align-items: flex-end;
+}
+
+.message-edit-textarea {
+  width: 100%;
+  max-width: 480px;
+  min-height: 60px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-bg-input, var(--color-bg-tertiary));
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.925rem;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+
+.message-edit-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.message-edit-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  background: none;
+  color: var(--color-text-secondary);
+  transition: all 0.15s ease;
+}
+
+.message-edit-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.message-edit-btn--save {
+  border-color: var(--color-accent);
+  color: var(--color-text-accent);
+}
+
+.message-edit-btn--save:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ===== Edit trigger + branch switcher footer ===== */
+.message-footer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.message-row--user .message-footer-row {
+  justify-content: flex-end;
+}
+
+.message-edit-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.message-row:hover .message-edit-trigger,
+.message-row:focus-within .message-edit-trigger {
+  opacity: 1;
+}
+
+.message-edit-trigger:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.message-pin-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.message-row:hover .message-pin-trigger,
+.message-row:focus-within .message-pin-trigger {
+  opacity: 1;
+}
+
+.message-pin-trigger:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* Already-pinned stays visible even without hovering, so it's obvious at a
+   glance which replies were already saved to Key Notes. */
+.message-pin-trigger--pinned {
+  opacity: 1;
+  color: #f59e0b;
+}
+
+.message-pin-trigger--pinned:hover {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.branch-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--color-text-muted);
+}
+
+.branch-switcher-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.branch-switcher-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.branch-switcher-label {
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  min-width: 24px;
+  text-align: center;
 }
 
 .thinking-indicator {

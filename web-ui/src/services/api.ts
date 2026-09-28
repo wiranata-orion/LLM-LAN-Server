@@ -167,6 +167,11 @@ export async function sendMessage(
         options: resolveChatOptions(settings),
         useContextRetrieval: settings.useContextRetrieval !== false,
         customInstructions: settings.customInstructions || undefined,
+        // Settings > Keamanan & Web - forwarded per request so the agent-
+        // server's fetch_url tool (see web-fetch.ts) respects the user's own
+        // timeout/User-Agent instead of a fixed value baked into the backend.
+        webFetchTimeoutMs: settings.webFetchTimeoutMs || undefined,
+        webFetchUserAgent: settings.webFetchUserAgent || undefined,
         messages: [...history, { role: 'user', content: message, ...(images?.length ? { images } : {}) }],
       }),
     })
@@ -223,6 +228,8 @@ export async function sendMessageStream(
         options: resolveChatOptions(settings),
         useContextRetrieval: settings.useContextRetrieval !== false,
         customInstructions: settings.customInstructions || undefined,
+        webFetchTimeoutMs: settings.webFetchTimeoutMs || undefined,
+        webFetchUserAgent: settings.webFetchUserAgent || undefined,
         messages: [...history, { role: 'user', content: message, ...(images?.length ? { images } : {}) }],
       }),
     })
@@ -482,6 +489,13 @@ export interface ServerConversation {
   updatedAt: string
   messages: Array<Record<string, unknown>>
   embedding?: number[] | null
+  // Message-branching tree (see web-ui's messageTree.js) - `messages` above
+  // is only ever the active path; an inactive branch (from editing or
+  // regenerating a past message) lives only here. Absent on a conversation
+  // saved before this existed.
+  nodes?: Record<string, Record<string, unknown>>
+  rootChildrenIds?: string[]
+  activeRootId?: string | null
 }
 
 export async function listServerConversations(): Promise<{ ok: boolean; conversations: ServerConversation[] }> {
@@ -495,6 +509,9 @@ export async function saveServerConversation(conversation: {
   createdAt?: string
   messages: Array<Record<string, unknown>>
   embedding?: number[] | null
+  nodes?: Record<string, Record<string, unknown>>
+  rootChildrenIds?: string[]
+  activeRootId?: string | null
 }): Promise<{ ok: boolean }> {
   const { conversationId, ...body } = conversation
   return requestJson(`/chat-history/conversations/${encodeURIComponent(conversationId)}`, {

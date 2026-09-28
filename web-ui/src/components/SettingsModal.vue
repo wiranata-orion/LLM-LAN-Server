@@ -22,6 +22,11 @@ import {
   BrainCircuit,
   FileText,
   Trash2,
+  Mic,
+  Volume2,
+  Cpu,
+  ShieldCheck,
+  PlayCircle,
 } from 'lucide-vue-next'
 import {
   getSettings,
@@ -39,6 +44,10 @@ import {
 } from '../services/memory.js'
 import { TASK_CATEGORIES, getDefaultModelMap } from '../services/autoModel.js'
 import { getMemoryStoragePath, setMemoryStoragePath, resetMemoryStoragePath, getChatHistoryStoragePath, getStorageUsage, vacuumStorage, listDocuments, deleteDocument } from '../services/api.ts'
+import { getVramGuardStatus } from '../services/vramEstimator.js'
+import { PERSONAS, getPersonaById } from '../services/personas.js'
+import { getCustomTemplates } from '../services/promptTemplates.js'
+import { getAvailableVoices, onVoicesChanged, speak, isTtsSupported } from '../services/speech.js'
 import ServerFolderBrowser from './ServerFolderBrowser.vue'
 
 const props = defineProps({
@@ -53,6 +62,13 @@ const props = defineProps({
   models: {
     type: Array,
     default: () => [],
+  },
+  // The currently selected chat model (App.vue's selectedModel) - used by the
+  // VRAM Guard estimate below to size the KV cache off the real model, not
+  // just the context slider in isolation.
+  selectedModel: {
+    type: String,
+    default: '',
   },
   // 'conversation' | 'workspace' - the chat-history storage folder (below) is
   // a Conversation-mode feature (it stores chat history), so it's hidden
@@ -93,6 +109,121 @@ const temperature = ref(0.7)
 const maxTokens = ref('')
 const useContextRetrieval = ref(true)
 const customInstructions = ref('')
+
+// ===== Persona presets (#18) =====
+// A persona is just a canned customInstructions string - selecting one
+// overwrites the textarea outright (it's a preset PICKER, not a merge), and
+// personaPreset tracks which one is currently active so re-selecting the
+// same preset is a no-op and manually editing the textarea afterwards is
+// understood as "gone custom" (see the textarea's own @input handler below).
+const personaPreset = ref('custom')
+
+function applyPersona(id) {
+  if (id === 'custom') {
+    personaPreset.value = 'custom'
+    return
+  }
+  const persona = getPersonaById(id)
+  if (!persona) return
+  customInstructions.value = persona.instructions
+  personaPreset.value = id
+}
+
+/** Editing the textarea by hand after picking a preset means the persona no longer describes what's actually there. */
+function handleCustomInstructionsInput() {
+  personaPreset.value = 'custom'
+}
+
+// ===== Slash-command templates (#8) - user's own additions/overrides ======
+// Drafted here as a plain array (not yet persisted - see saveSettings())
+// so "Batal"/closing without saving discards template edits exactly like
+// every other field in this modal.
+const customTemplates = ref([])
+const newTemplateTrigger = ref('')
+const newTemplateLabel = ref('')
+const newTemplateText = ref('')
+
+function addCustomTemplate() {
+  const trigger = newTemplateTrigger.value.trim().toLowerCase().replace(/^\//, '')
+  const text = newTemplateText.value.trim()
+  if (!trigger || !text) return
+  const existingIndex = customTemplates.value.findIndex((t) => t.trigger === trigger)
+  const entry = { trigger, label: newTemplateLabel.value.trim() || trigger, text }
+  if (existingIndex !== -1) customTemplates.value.splice(existingIndex, 1, entry)
+  else customTemplates.value.push(entry)
+  newTemplateTrigger.value = ''
+  newTemplateLabel.value = ''
+  newTemplateText.value = ''
+}
+
+function removeCustomTemplate(trigger) {
+  customTemplates.value = customTemplates.value.filter((t) => t.trigger !== trigger)
+}
+
+// ===== Settings > Suara & Audio =====
+const LANGUAGE_OPTIONS = [
+  { code: 'id-ID', label: 'Bahasa Indonesia' },
+  { code: 'en-US', label: 'English (US)' },
+  { code: 'en-GB', label: 'English (UK)' },
+  { code: 'ja-JP', label: 'Japanese' },
+  { code: 'ko-KR', label: 'Korean' },
+  { code: 'zh-CN', label: 'Chinese (Simplified)' },
+  { code: 'es-ES', label: 'Spanish' },
+]
+
+const speechLang = ref('id-ID')
+const ttsVoiceName = ref('')
+const ttsRate = ref(1)
+const ttsPitch = ref(1)
+const ttsVolume = ref(100)
+const autoReadResponses = ref(false)
+const ttsSupportedHere = isTtsSupported()
+
+// Voice lists load asynchronously in some browsers (empty on the very first
+// read) - re-reads once the browser actually reports them, rather than the
+// dropdown silently staying empty forever on those browsers.
+const availableVoices = ref(getAvailableVoices())
+let unsubscribeVoices = () => {}
+
+// Voices matching the selected language surface first - still shows every
+// installed voice below that, since "matching" is a loose BCP-47 prefix
+// check and a user may reasonably want a differently-accented voice anyway.
+const sortedVoices = computed(() => {
+  const prefix = speechLang.value.split('-')[0]
+  return [...availableVoices.value].sort((a, b) => {
+    const aMatch = a.lang.startsWith(prefix) ? 0 : 1
+    const bMatch = b.lang.startsWith(prefix) ? 0 : 1
+    return aMatch - bMatch || a.name.localeCompare(b.name)
+  })
+})
+
+const isTestingVoice = ref(false)
+
+function testVoice() {
+  if (!ttsSupportedHere) return
+  isTestingVoice.value = true
+  speak('Halo, ini contoh suara AI yang dipilih.', {
+    rate: ttsRate.value,
+    pitch: ttsPitch.value,
+    volume: ttsVolume.value,
+    voiceName: ttsVoiceName.value,
+    lang: speechLang.value,
+    onEnd: () => { isTestingVoice.value = false },
+  })
+}
+
+// ===== Settings > Sandbox & Execution =====
+const codeExecutionTimeoutSec = ref(5) // stored/persisted in ms (see saveSettings); edited here in seconds for a human-sized number
+const codeExecutionMode = ref('manual') // 'manual' | 'auto'
+const pyodideMemoryLimitMb = ref(512)
+const sqlMemoryLimitMb = ref(256)
+const defaultPreviewDevice = ref('desktop') // 'desktop' | 'mobile' | 'tablet'
+
+// ===== Settings > Keamanan & Web =====
+const securityScannerSensitivity = ref('moderate') // 'strict' | 'moderate' | 'disabled'
+const secretMaskingEnabled = ref(true)
+const webFetchTimeoutSec = ref(15) // stored/persisted in ms, edited here in seconds
+const webFetchUserAgent = ref('')
 
 // ===== Chat History Storage ("Folder Penyimpanan Fisik") =====
 // This only stores raw chat history (not the "real" memory system above), mediated
@@ -382,10 +513,13 @@ onMounted(() => {
   loadChatHistoryStorage()
   loadStorageUsage()
   loadRagDocuments()
+  availableVoices.value = getAvailableVoices()
+  unsubscribeVoices = onVoicesChanged(() => { availableVoices.value = getAvailableVoices() })
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown)
+  unsubscribeVoices()
   // Only discard live preview changes when Settings was closed without saving.
   if (!didSaveSettings) {
     document.documentElement.setAttribute('data-theme', initialTheme.value)
@@ -410,6 +544,27 @@ function loadCurrentSettings() {
   maxTokens.value = s.maxTokens ?? ''
   useContextRetrieval.value = s.useContextRetrieval !== false
   customInstructions.value = s.customInstructions || ''
+  personaPreset.value = s.personaPreset || 'custom'
+  vramLimitGb.value = s.vramLimitGb || 8
+  customTemplates.value = getCustomTemplates()
+
+  speechLang.value = s.speechLang || 'id-ID'
+  ttsVoiceName.value = s.ttsVoiceName || ''
+  ttsRate.value = s.ttsRate || 1
+  ttsPitch.value = s.ttsPitch || 1
+  ttsVolume.value = s.ttsVolume ?? 100
+  autoReadResponses.value = !!s.autoReadResponses
+
+  codeExecutionTimeoutSec.value = (s.codeExecutionTimeoutMs || 5000) / 1000
+  codeExecutionMode.value = s.codeExecutionMode || 'manual'
+  pyodideMemoryLimitMb.value = s.pyodideMemoryLimitMb || 512
+  sqlMemoryLimitMb.value = s.sqlMemoryLimitMb || 256
+  defaultPreviewDevice.value = s.defaultPreviewDevice || 'desktop'
+
+  securityScannerSensitivity.value = s.securityScannerSensitivity || 'moderate'
+  secretMaskingEnabled.value = s.secretMaskingEnabled !== false
+  webFetchTimeoutSec.value = (s.webFetchTimeoutMs || 15000) / 1000
+  webFetchUserAgent.value = s.webFetchUserAgent || DEFAULT_SETTINGS.webFetchUserAgent
 
   autoModelEnabled.value = !!s.autoModelEnabled
   autoModelMapLaptop.value = { ...(s.autoModelMapLaptop || {}) }
@@ -488,76 +643,22 @@ function setNumCtxPreset(val) {
   }
 }
 
-// Live performance estimation based on active mode (PC Server vs Laptop Local)
+// VRAM Guard (#15) - a real estimate from the actually-selected model's size
+// (+ parameter count, when known) and the active engine's context window,
+// compared against the user's own GPU limit below. See vramEstimator.js for
+// the math and its honestly-stated limits (an estimate, not exact accounting).
+const vramLimitGb = ref(8)
+
 const vramStatus = computed(() => {
   const isPc = activeEngine.value === 'pc'
-  const ctxVal = isPc
+  const numCtx = isPc
     ? (numCtxPc.value === 'custom' ? parseInt(customNumCtxPc.value) || 4096 : numCtxPc.value)
     : (numCtxLaptop.value === 'custom' ? parseInt(customNumCtxLaptop.value) || 2048 : numCtxLaptop.value)
-
-  if (isPc) {
-    // PC (Server)
-    if (ctxVal <= 2048) {
-      return {
-        level: 'vram--safe',
-        title: 'Sangat Hemat & Respon Cepat',
-        estimate: 'Beban Ringan',
-        description: 'Respon model instan dengan sisa memori sangat lega.',
-      }
-    } else if (ctxVal <= 4096) {
-      return {
-        level: 'vram--optimal',
-        title: 'Optimal & Seimbang',
-        estimate: 'Beban Optimal',
-        description: 'Kapasitas context window ideal tanpa penurunan performa.',
-      }
-    } else if (ctxVal <= 8192) {
-      return {
-        level: 'vram--good',
-        title: 'Kapasitas Luas (Dokumen & Kode Panjang)',
-        estimate: 'Kapasitas Luas',
-        description: 'Mampu memproses percakapan panjang',
-      }
-    } else {
-      return {
-        level: 'vram--warning',
-        title: 'Beban Ekstra Tinggi',
-        estimate: 'Kapasitas Maksimal',
-        description: 'Disarankan untuk model berukuran kecil/sedang agar tetap efisien.',
-      }
-    }
-  } else {
-    // Laptop (Local)
-    if (ctxVal <= 1024) {
-      return {
-        level: 'vram--safe',
-        title: 'Ultra Ringan',
-        estimate: 'Beban Ringan',
-        description: 'Respon model cepat dan hemat daya.',
-      }
-    } else if (ctxVal <= 2048) {
-      return {
-        level: 'vram--optimal',
-        title: 'Optimal',
-        estimate: 'Beban Optimal',
-        description: 'Berjalan stabil, lancar, dan responsif.',
-      }
-    } else if (ctxVal <= 3072) {
-      return {
-        level: 'vram--good',
-        title: 'Beban Sedang',
-        estimate: 'Beban Sedang',
-        description: 'Cocok untuk model-model berukuran ringan',
-      }
-    } else {
-      return {
-        level: 'vram--warning',
-        title: 'Beban Tinggi',
-        estimate: 'Beban Tinggi',
-        description: 'Kecepatan generasi teks mungkin berkurang pada percakapan panjang.',
-      }
-    }
-  }
+  const model = props.models.find((m) => m.name === props.selectedModel) || null
+  const status = getVramGuardStatus({ model, numCtx, vramLimitGb: vramLimitGb.value })
+  // Template already expects a `vram--<level>` CSS modifier class (kept as-is
+  // rather than touching every call site that reads vramStatus.level).
+  return { ...status, level: `vram--${status.level}` }
 })
 
 // ===== Themes =====
@@ -708,6 +809,24 @@ function saveSettings() {
     maxTokens: maxTokens.value !== '' ? parseInt(maxTokens.value) : '',
     useContextRetrieval: useContextRetrieval.value,
     customInstructions: customInstructions.value.trim(),
+    personaPreset: personaPreset.value,
+    vramLimitGb: parseFloat(vramLimitGb.value) || 8,
+    promptTemplates: [...customTemplates.value],
+    speechLang: speechLang.value,
+    ttsVoiceName: ttsVoiceName.value,
+    ttsRate: parseFloat(ttsRate.value) || 1,
+    ttsPitch: parseFloat(ttsPitch.value) || 1,
+    ttsVolume: parseInt(ttsVolume.value, 10) || 0,
+    autoReadResponses: autoReadResponses.value,
+    codeExecutionTimeoutMs: Math.round((parseFloat(codeExecutionTimeoutSec.value) || 5) * 1000),
+    codeExecutionMode: codeExecutionMode.value,
+    pyodideMemoryLimitMb: parseInt(pyodideMemoryLimitMb.value, 10) || 512,
+    sqlMemoryLimitMb: parseInt(sqlMemoryLimitMb.value, 10) || 256,
+    defaultPreviewDevice: defaultPreviewDevice.value,
+    securityScannerSensitivity: securityScannerSensitivity.value,
+    secretMaskingEnabled: secretMaskingEnabled.value,
+    webFetchTimeoutMs: Math.round((parseFloat(webFetchTimeoutSec.value) || 15) * 1000),
+    webFetchUserAgent: webFetchUserAgent.value.trim() || DEFAULT_SETTINGS.webFetchUserAgent,
     autoModelEnabled: autoModelEnabled.value,
     autoModelMapLaptop: { ...autoModelMapLaptop.value },
     autoModelMapPc: { ...autoModelMapPc.value },
@@ -743,6 +862,24 @@ function resetDefaults() {
   maxTokens.value = DEFAULT_SETTINGS.maxTokens
   useContextRetrieval.value = DEFAULT_SETTINGS.useContextRetrieval !== false
   customInstructions.value = DEFAULT_SETTINGS.customInstructions || ''
+  personaPreset.value = DEFAULT_SETTINGS.personaPreset || 'custom'
+  vramLimitGb.value = DEFAULT_SETTINGS.vramLimitGb || 8
+  customTemplates.value = []
+  speechLang.value = DEFAULT_SETTINGS.speechLang || 'id-ID'
+  ttsVoiceName.value = ''
+  ttsRate.value = DEFAULT_SETTINGS.ttsRate || 1
+  ttsPitch.value = DEFAULT_SETTINGS.ttsPitch || 1
+  ttsVolume.value = DEFAULT_SETTINGS.ttsVolume ?? 100
+  autoReadResponses.value = DEFAULT_SETTINGS.autoReadResponses || false
+  codeExecutionTimeoutSec.value = (DEFAULT_SETTINGS.codeExecutionTimeoutMs || 5000) / 1000
+  codeExecutionMode.value = DEFAULT_SETTINGS.codeExecutionMode || 'manual'
+  pyodideMemoryLimitMb.value = DEFAULT_SETTINGS.pyodideMemoryLimitMb || 512
+  sqlMemoryLimitMb.value = DEFAULT_SETTINGS.sqlMemoryLimitMb || 256
+  defaultPreviewDevice.value = DEFAULT_SETTINGS.defaultPreviewDevice || 'desktop'
+  securityScannerSensitivity.value = DEFAULT_SETTINGS.securityScannerSensitivity || 'moderate'
+  secretMaskingEnabled.value = DEFAULT_SETTINGS.secretMaskingEnabled !== false
+  webFetchTimeoutSec.value = (DEFAULT_SETTINGS.webFetchTimeoutMs || 15000) / 1000
+  webFetchUserAgent.value = DEFAULT_SETTINGS.webFetchUserAgent || ''
   autoModelEnabled.value = DEFAULT_SETTINGS.autoModelEnabled || false
   autoModelMapLaptop.value = {}
   autoModelMapPc.value = {}
@@ -800,6 +937,33 @@ function resetDefaults() {
           >
             <FileText :size="15" />
             <span>Dokumen RAG</span>
+          </button>
+
+          <button
+            class="tab-btn"
+            :class="{ 'tab-btn--active': activeTab === 'audio' }"
+            @click="activeTab = 'audio'"
+          >
+            <Mic :size="15" />
+            <span>Suara & Audio</span>
+          </button>
+
+          <button
+            class="tab-btn"
+            :class="{ 'tab-btn--active': activeTab === 'sandbox' }"
+            @click="activeTab = 'sandbox'"
+          >
+            <Cpu :size="15" />
+            <span>Sandbox & Execution</span>
+          </button>
+
+          <button
+            class="tab-btn"
+            :class="{ 'tab-btn--active': activeTab === 'security' }"
+            @click="activeTab = 'security'"
+          >
+            <ShieldCheck :size="15" />
+            <span>Keamanan & Web</span>
           </button>
 
           <button
@@ -1183,7 +1347,8 @@ function resetDefaults() {
                 />
               </div>
 
-              <!-- Performance Status Card -->
+              <!-- VRAM Guard (#15) - real estimate from the selected model's size
+                   (+ parameter count when known) and this context window. -->
               <div class="vram-estimate-box" :class="vramStatus.level">
                 <div class="vram-estimate-row">
                   <div class="vram-estimate-label">
@@ -1194,6 +1359,18 @@ function resetDefaults() {
                   <span class="vram-usage-badge">{{ vramStatus.estimate }}</span>
                 </div>
                 <span class="vram-estimate-desc">{{ vramStatus.description }}</span>
+                <div class="vram-limit-row">
+                  <label for="vram-limit-input">VRAM GPU (GB):</label>
+                  <input
+                    id="vram-limit-input"
+                    v-model.number="vramLimitGb"
+                    type="number"
+                    class="form-input form-input--compact vram-limit-input"
+                    min="1"
+                    max="256"
+                    step="1"
+                  />
+                </div>
               </div>
             </div>
 
@@ -1266,6 +1443,25 @@ function resetDefaults() {
             <!-- Custom Instructions / Persona -->
             <div class="form-group">
               <label for="custom-instructions-input" class="form-label">Instruksi Tambahan / Persona</label>
+
+              <!-- Persona preset picker (#18) - selecting one overwrites the
+                   textarea below outright; typing in the textarea afterwards
+                   switches this back to "Kustom" since it no longer matches
+                   any preset verbatim. -->
+              <select
+                class="form-input form-input--compact persona-select"
+                :value="personaPreset"
+                @change="applyPersona($event.target.value)"
+              >
+                <option value="custom">Kustom (tulis sendiri)</option>
+                <option v-for="persona in PERSONAS" :key="persona.id" :value="persona.id">
+                  {{ persona.label }}
+                </option>
+              </select>
+              <p v-if="personaPreset !== 'custom'" class="form-hint">
+                {{ getPersonaById(personaPreset)?.desc }}
+              </p>
+
               <textarea
                 id="custom-instructions-input"
                 v-model="customInstructions"
@@ -1273,8 +1469,54 @@ function resetDefaults() {
                 placeholder="Contoh: Selalu jawab dengan gaya santai. Kamu juga ahli masakan Indonesia."
                 rows="4"
                 maxlength="4000"
+                @input="handleCustomInstructionsInput"
               ></textarea>
               <p class="form-hint">Ditambahkan setelah instruksi dasar AI (identitas &amp; aturan keamanan tetap berlaku). Kosongkan untuk perilaku default.</p>
+            </div>
+
+            <!-- Quick "/" template management (#8) -->
+            <div class="form-group">
+              <label class="form-label">Template Prompt (Slash Command)</label>
+              <p class="form-hint">Ketik <code>/</code> di kolom chat untuk memunculkan daftar ini. Template bawaan (/refactor, /test, /doc, /explain, /bug, /optimize) selalu tersedia; tambahkan atau timpa dengan milikmu sendiri di bawah.</p>
+
+              <div v-if="customTemplates.length" class="template-list">
+                <div v-for="template in customTemplates" :key="template.trigger" class="template-list-item">
+                  <div class="template-list-item-info">
+                    <span class="template-trigger">/{{ template.trigger }}</span>
+                    <span class="template-label">{{ template.label }}</span>
+                  </div>
+                  <button class="template-remove-btn" type="button" title="Hapus template" @click="removeCustomTemplate(template.trigger)">
+                    <Trash2 :size="13" />
+                  </button>
+                </div>
+              </div>
+
+              <div class="template-add-row">
+                <input
+                  v-model="newTemplateTrigger"
+                  type="text"
+                  class="form-input form-input--compact template-add-trigger"
+                  placeholder="trigger (mis. review)"
+                  maxlength="30"
+                />
+                <input
+                  v-model="newTemplateLabel"
+                  type="text"
+                  class="form-input form-input--compact template-add-label"
+                  placeholder="Label (opsional)"
+                  maxlength="60"
+                />
+              </div>
+              <textarea
+                v-model="newTemplateText"
+                class="form-input form-input--compact template-add-text"
+                placeholder="Isi template yang akan disisipkan ke kolom chat..."
+                rows="2"
+                maxlength="2000"
+              ></textarea>
+              <button class="btn btn--secondary template-add-btn" type="button" :disabled="!newTemplateTrigger.trim() || !newTemplateText.trim()" @click="addCustomTemplate">
+                Tambah Template
+              </button>
             </div>
           </div>
 
@@ -1326,6 +1568,140 @@ function resetDefaults() {
                   <Trash2 :size="14" />
                 </button>
               </div>
+            </div>
+          </div>
+
+          <!-- TAB: SUARA & AUDIO -->
+          <div v-if="activeTab === 'audio'" class="tab-pane">
+            <p v-if="!ttsSupportedHere" class="form-hint" style="color: var(--color-danger);">
+              Browser ini tidak mendukung Text-to-Speech - pengaturan di bawah tersimpan tapi tidak berpengaruh di sini.
+            </p>
+
+            <div class="form-group">
+              <label class="form-label">Bahasa (STT &amp; TTS)</label>
+              <select v-model="speechLang" class="form-input form-input--compact">
+                <option v-for="lang in LANGUAGE_OPTIONS" :key="lang.code" :value="lang.code">{{ lang.label }}</option>
+              </select>
+              <p class="form-hint">Menentukan bahasa yang dikenali saat bicara (mikrofon) dan aksen suara AI saat membaca balasan.</p>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Karakter Suara AI</label>
+              <select v-model="ttsVoiceName" class="form-input form-input--compact">
+                <option value="">Default browser/OS</option>
+                <option v-for="voice in sortedVoices" :key="voice.name" :value="voice.name">
+                  {{ voice.name }} ({{ voice.lang }})
+                </option>
+              </select>
+              <p v-if="!sortedVoices.length" class="form-hint">Tidak ada suara terdeteksi dari browser ini.</p>
+            </div>
+
+            <button class="btn btn--secondary" type="button" :disabled="!ttsSupportedHere || isTestingVoice" @click="testVoice">
+              <PlayCircle :size="14" />
+              <span>{{ isTestingVoice ? 'Memutar...' : 'Uji Suara' }}</span>
+            </button>
+
+            <div class="form-group" style="margin-top: 16px;">
+              <label class="form-label">Kecepatan Bicara: {{ Number(ttsRate).toFixed(1) }}x</label>
+              <input v-model.number="ttsRate" type="range" min="0.5" max="2" step="0.1" class="range-slider" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Nada Suara (Pitch): {{ Number(ttsPitch).toFixed(1) }}</label>
+              <input v-model.number="ttsPitch" type="range" min="0.5" max="1.5" step="0.1" class="range-slider" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Volume: {{ ttsVolume }}%</label>
+              <input v-model.number="ttsVolume" type="range" min="0" max="100" step="5" class="range-slider" />
+            </div>
+
+            <div class="setting-toggle-box glass">
+              <div class="toggle-info">
+                <div class="toggle-title-row">
+                  <Volume2 :size="15" class="toggle-icon" />
+                  <span class="toggle-title">Baca Otomatis Balasan AI</span>
+                </div>
+                <span class="form-hint">Setiap balasan AI langsung dibacakan begitu selesai, tanpa perlu klik ikon speaker. Kode, LaTeX, dan markdown selalu dibersihkan dulu sebelum dibacakan.</span>
+              </div>
+              <label class="switch">
+                <input v-model="autoReadResponses" type="checkbox" />
+                <span class="slider round"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- TAB: SANDBOX & EXECUTION -->
+          <div v-if="activeTab === 'sandbox'" class="tab-pane">
+            <div class="form-group">
+              <label class="form-label">Batas Waktu Eksekusi: {{ Number(codeExecutionTimeoutSec).toFixed(1) }}s</label>
+              <input v-model.number="codeExecutionTimeoutSec" type="range" min="1" max="30" step="0.5" class="range-slider" />
+              <p class="form-hint">Kode yang dijalankan di sandbox (JS/TS/Python/SQL) otomatis dihentikan jika melebihi batas ini - mencegah infinite loop membekukan browser.</p>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Mode Eksekusi</label>
+              <div class="preset-chips-row">
+                <button class="chip-btn" :class="{ 'chip-btn--active': codeExecutionMode === 'manual' }" type="button" @click="codeExecutionMode = 'manual'">Manual (klik Run)</button>
+                <button class="chip-btn" :class="{ 'chip-btn--active': codeExecutionMode === 'auto' }" type="button" @click="codeExecutionMode = 'auto'">Auto-Run Skrip Aman</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Batas Memori Pyodide (Python): {{ pyodideMemoryLimitMb }} MB</label>
+              <input v-model.number="pyodideMemoryLimitMb" type="range" min="128" max="2048" step="128" class="range-slider" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Batas Memori SQL (sql.js): {{ sqlMemoryLimitMb }} MB</label>
+              <input v-model.number="sqlMemoryLimitMb" type="range" min="64" max="1024" step="64" class="range-slider" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Frame Preview Default</label>
+              <div class="preset-chips-row">
+                <button class="chip-btn" :class="{ 'chip-btn--active': defaultPreviewDevice === 'desktop' }" type="button" @click="defaultPreviewDevice = 'desktop'">🖥️ Desktop</button>
+                <button class="chip-btn" :class="{ 'chip-btn--active': defaultPreviewDevice === 'mobile' }" type="button" @click="defaultPreviewDevice = 'mobile'">📱 Mobile</button>
+                <button class="chip-btn" :class="{ 'chip-btn--active': defaultPreviewDevice === 'tablet' }" type="button" @click="defaultPreviewDevice = 'tablet'">📐 Tablet</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB: KEAMANAN & WEB -->
+          <div v-if="activeTab === 'security'" class="tab-pane">
+            <div class="form-group">
+              <label class="form-label">Sensitivitas Security Scanner</label>
+              <div class="preset-chips-row">
+                <button class="chip-btn" :class="{ 'chip-btn--active': securityScannerSensitivity === 'strict' }" type="button" @click="securityScannerSensitivity = 'strict'">Strict</button>
+                <button class="chip-btn" :class="{ 'chip-btn--active': securityScannerSensitivity === 'moderate' }" type="button" @click="securityScannerSensitivity = 'moderate'">Moderate</button>
+                <button class="chip-btn" :class="{ 'chip-btn--active': securityScannerSensitivity === 'disabled' }" type="button" @click="securityScannerSensitivity = 'disabled'">Disabled</button>
+              </div>
+              <p class="form-hint">Berlaku untuk pemindaian kode di Workspace (eval, secret hardcoded, SQL injection, dll). "Moderate" hanya menampilkan temuan risiko tinggi.</p>
+            </div>
+
+            <div class="setting-toggle-box glass">
+              <div class="toggle-info">
+                <div class="toggle-title-row">
+                  <ShieldCheck :size="15" class="toggle-icon" />
+                  <span class="toggle-title">Secret Key Auto-Masking</span>
+                </div>
+                <span class="form-hint">Menyamarkan sesuatu yang terlihat seperti API key/token/password hardcoded pada pesan yang kamu kirim, sebelum dikirim ke Ollama.</span>
+              </div>
+              <label class="switch">
+                <input v-model="secretMaskingEnabled" type="checkbox" />
+                <span class="slider round"></span>
+              </label>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Batas Waktu Web Fetch: {{ Number(webFetchTimeoutSec).toFixed(0) }}s</label>
+              <input v-model.number="webFetchTimeoutSec" type="range" min="5" max="60" step="5" class="range-slider" />
+              <p class="form-hint">Berlaku saat AI mengambil (fetch) sebuah URL - lihat fitur Web Research Agent.</p>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">User-Agent Web Fetch</label>
+              <input v-model="webFetchUserAgent" type="text" class="form-input form-input--compact" placeholder="Mozilla/5.0 (compatible; XufruzLLM-ResearchAgent/1.0)" />
             </div>
           </div>
 
@@ -2381,6 +2757,110 @@ input:checked + .slider:before {
   line-height: 1.35;
 }
 
+.vram-limit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.vram-limit-input {
+  width: 70px;
+}
+
+/* ===== Persona picker (#18) ===== */
+.persona-select {
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+/* ===== Slash-command template management (#8) ===== */
+.template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.template-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+}
+
+.template-list-item-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.template-trigger {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--color-text-accent);
+  flex-shrink: 0;
+  font-size: 0.78rem;
+}
+
+.template-label {
+  color: var(--color-text-secondary);
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-remove-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.template-remove-btn:hover {
+  color: var(--color-danger);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.template-add-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.template-add-trigger {
+  flex: 0 0 160px;
+}
+
+.template-add-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.template-add-text {
+  margin-top: 6px;
+}
+
+.template-add-btn {
+  margin-top: 8px;
+  width: auto;
+}
+
 /* VRAM Status Colors */
 .vram--safe {
   border-color: var(--color-accent);
@@ -2422,16 +2902,41 @@ input:checked + .slider:before {
 }
 
 .vram--warning {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.06);
+}
+.vram--warning .vram-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.7);
+}
+.vram--warning .vram-usage-badge {
+  background: rgba(245, 158, 11, 0.18);
+  color: #f59e0b;
+}
+
+.vram--critical {
   border-color: rgba(239, 68, 68, 0.35);
   background: rgba(239, 68, 68, 0.05);
 }
-.vram--warning .vram-dot {
+.vram--critical .vram-dot {
   background: #ef4444;
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
 }
-.vram--warning .vram-usage-badge {
+.vram--critical .vram-usage-badge {
   background: rgba(239, 68, 68, 0.15);
   color: #ef4444;
+}
+
+.vram--unknown {
+  border-color: var(--color-border);
+  background: var(--color-bg-tertiary);
+}
+.vram--unknown .vram-dot {
+  background: var(--color-text-muted);
+}
+.vram--unknown .vram-usage-badge {
+  background: var(--color-bg-hover);
+  color: var(--color-text-muted);
 }
 
 /* Slider Controls */

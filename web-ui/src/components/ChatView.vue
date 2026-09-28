@@ -1,7 +1,8 @@
 <script setup>
-import { ref, nextTick, watch, onMounted, computed } from 'vue'
+import { ref, nextTick, watch, onMounted, onUnmounted, computed } from 'vue'
 import MessageBubble from './MessageBubble.vue'
 import ChatInput from './ChatInput.vue'
+import SelectionActionPopover from './SelectionActionPopover.vue'
 import { Bot, Sparkles, Cpu, Zap, Copy, Check, RefreshCw, ThumbsUp, ThumbsDown, Gauge } from 'lucide-vue-next'
 import { getModelDisplayName, formatDuration, perfSummary, perfTooltip } from '../services/api.js'
 
@@ -18,6 +19,13 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  // The active conversation's id - only forwarded to MessageBubble so it can
+  // check whether each of its own messages is already pinned (see
+  // pinnedNotes.js / App.vue's handlePinMessage).
+  conversationId: {
+    type: String,
+    default: '',
+  },
   // Whether the selected model declares Ollama's "vision" capability - see
   // App.vue's updateModelVisionSupport. Forwarded straight to ChatInput,
   // which hides the "Upload Gambar" option entirely when this is false.
@@ -31,7 +39,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['send', 'stop', 'regenerate', 'rate-message'])
+const emit = defineEmits(['send', 'stop', 'regenerate', 'rate-message', 'edit-message', 'switch-branch', 'clarify-submit', 'pin-message'])
 
 function isMessageStreaming(index) {
   return props.isGenerating && index === props.messages.length - 1
@@ -45,6 +53,76 @@ function isMessageStreaming(index) {
 function emitRate(index, rating) {
   if (props.messages[index]?.rating) return
   emit('rate-message', index, rating)
+}
+
+// MessageBubble only knows its own message, not its index in the
+// conversation - App.vue's handleEditMessage/handleSwitchBranch need that
+// index to find the right node in the tree, so it's attached here.
+function emitEditMessage(index, newText) {
+  emit('edit-message', index, newText)
+}
+
+function emitSwitchBranch(index, delta) {
+  emit('switch-branch', index, delta)
+}
+
+function emitClarifySubmit(payload) {
+  emit('clarify-submit', payload)
+}
+
+function emitPinMessage(index) {
+  emit('pin-message', index)
+}
+
+// ===== Code Explainer "Hover & Highlight" (#5) =====
+// Selecting text/code inside an ASSISTANT reply shows a small floating
+// popover with quick actions; picking one sends a follow-up prompt built
+// from the selected text through the normal send pipeline - see
+// handleSelectionAction below and App.vue's plain sendMessage().
+const selectionPopover = ref({ visible: false, x: 0, y: 0, text: '' })
+
+function updateSelectionPopover() {
+  const selection = window.getSelection()
+  const text = selection?.toString().trim()
+  if (!text || !selection.rangeCount) {
+    selectionPopover.value = { ...selectionPopover.value, visible: false }
+    return
+  }
+
+  // Only for a selection actually inside an assistant bubble in THIS
+  // ChatView instance - not the composer, not a user message, not some
+  // unrelated text elsewhere on the page (e.g. the sidebar).
+  const anchorElement = selection.anchorNode?.nodeType === Node.TEXT_NODE
+    ? selection.anchorNode.parentElement
+    : selection.anchorNode
+  const assistantBubble = anchorElement?.closest?.('.message-row--assistant .message-bubble--assistant')
+  if (!assistantBubble || !messagesContainer.value?.contains(assistantBubble)) {
+    selectionPopover.value = { ...selectionPopover.value, visible: false }
+    return
+  }
+
+  const rect = selection.getRangeAt(0).getBoundingClientRect()
+  selectionPopover.value = { visible: true, x: rect.left + rect.width / 2, y: rect.top, text }
+}
+
+function hideSelectionPopover() {
+  selectionPopover.value = { ...selectionPopover.value, visible: false }
+}
+
+const SELECTION_ACTION_PROMPTS = {
+  explain: 'Jelaskan bagian berikut secara detail:',
+  'find-bugs': 'Cari kemungkinan bug atau kesalahan pada bagian berikut, dan jelaskan cara memperbaikinya:',
+  refactor: 'Refactor bagian berikut agar lebih bersih dan mudah dibaca, tanpa mengubah perilakunya:',
+  optimize: 'Optimalkan performa bagian berikut dan jelaskan trade-off dari setiap perubahan:',
+}
+
+function handleSelectionAction(actionId) {
+  const text = selectionPopover.value.text
+  hideSelectionPopover()
+  window.getSelection()?.removeAllRanges()
+  if (!text) return
+  const prompt = SELECTION_ACTION_PROMPTS[actionId] || SELECTION_ACTION_PROMPTS.explain
+  emit('send', `${prompt}\n\n\`\`\`\n${text}\n\`\`\``, [], [])
 }
 
 const messagesContainer = ref(null)
@@ -74,6 +152,7 @@ function onScroll() {
   if (!el) return
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20
   userScrolling.value = !atBottom
+  hideSelectionPopover() // the popover is positioned in fixed viewport coords, so it would drift away from the actual selection on scroll
 }
 
 watch(
@@ -91,6 +170,11 @@ watch(
 
 onMounted(() => {
   chatInputRef.value?.focusInput()
+  document.addEventListener('selectionchange', updateSelectionPopover)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('selectionchange', updateSelectionPopover)
 })
 
 function handleSend(text, files, images) {
@@ -132,6 +216,14 @@ function emitRegenerate() {
 
 <template>
   <div class="chat-view">
+    <!-- Code Explainer "Hover & Highlight" (#5) - floats above whatever text is currently selected in an assistant reply. -->
+    <SelectionActionPopover
+      v-if="selectionPopover.visible"
+      :x="selectionPopover.x"
+      :y="selectionPopover.y"
+      @action="handleSelectionAction"
+    />
+
     <!-- Messages Area -->
     <div ref="messagesContainer" class="messages-area" @scroll="onScroll">
       <!-- Welcome Screen -->
@@ -154,12 +246,22 @@ function emitRegenerate() {
 
       <!-- Messages -->
       <template v-else>
-        <template v-for="(msg, i) in messages" :key="i">
+        <!-- Keyed by message id (not index) once messageTree.js has assigned
+             one - switching branches or editing a message replaces this
+             array's contents outright (see syncActivePath), and an
+             index-based key would let Vue reuse the wrong MessageBubble
+             instance (and its local isEditing state) across that swap. -->
+        <template v-for="(msg, i) in messages" :key="msg.id || i">
           <div class="message-item">
             <MessageBubble
               :message="msg"
               :is-generating="isMessageStreaming(i)"
               :elapsed-seconds="generationElapsedSeconds"
+              :conversation-id="conversationId"
+              @edit="emitEditMessage(i, $event)"
+              @switch-branch="emitSwitchBranch(i, $event)"
+              @clarify-submit="emitClarifySubmit"
+              @pin="emitPinMessage(i)"
             />
 
             <!-- Actions settle in only once this reply has fully finished. -->

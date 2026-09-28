@@ -7,11 +7,18 @@ import MemoryIndicator from './components/MemoryIndicator.vue'
 import WorkspaceView from './components/WorkspaceView.vue'
 import PerformanceDashboard from './components/PerformanceDashboard.vue'
 import ModelManager from './components/ModelManager.vue'
-import { PanelLeft, Server, Laptop, AlertCircle, X, Gauge } from 'lucide-vue-next'
+import PinnedNotesDrawer from './components/PinnedNotesDrawer.vue'
+import StandupJournal from './components/StandupJournal.vue'
+import TerminalLogAnalyzer from './components/TerminalLogAnalyzer.vue'
+import { PanelLeft, Server, Laptop, AlertCircle, X, Gauge, Pin, ClipboardList, Terminal } from 'lucide-vue-next'
 import { getModels, getApiUrl, getSettings, saveSettingsToStorage, setModelNickname, applyCustomTheme, clearCustomThemeContrast } from './services/api.js'
 import { sendMessageStream as sendAgentMessageStream, uploadDocument, rateMemoryMessage, checkAgentHealth, syncActiveEngine, checkModelSupportsVision } from './services/api.ts'
 import { resolveAutoModel } from './services/autoModel.js'
 import { resizeImagesToBase64 } from './services/image.js'
+import { createNode, appendMessage, editMessage, switchBranch, deleteLeaf, retractLastReply } from './services/messageTree.js'
+import { getVramGuardStatus } from './services/vramEstimator.js'
+import { pinNote, unpinAllFromConversation } from './services/pinnedNotes.js'
+import { maskSecrets } from './services/secretMasking.js'
 import {
   loadStoredConversations,
   deleteConversation,
@@ -27,6 +34,9 @@ const sidebarOpen = ref(true)
 const showSettings = ref(false)
 const showPerformanceDashboard = ref(false)
 const showModelManager = ref(false)
+const showPinnedNotes = ref(false)
+const showStandupJournal = ref(false)
+const showTerminalAnalyzer = ref(false)
 const models = ref([])
 const selectedModel = ref('')
 const isGenerating = ref(false)
@@ -191,9 +201,23 @@ onUnmounted(() => {
 })
 
 // ===== API =====
+// fetchModels() is called from several places that can overlap in flight
+// (a manual toggleEngine(), plus the auto-fallback event that a SLOW,
+// still-in-flight PC check can itself dispatch after the user has already
+// switched back to Laptop and gotten a fresh, successful check back) - with
+// no guard, whichever call happens to resolve LAST wins, even if it's the
+// stale one. This token makes every call check, right before it writes
+// anything, whether a newer fetchModels() has since started; if so, its own
+// result is simply discarded instead of clobbering the newer one. This was
+// the actual cause of the engine pill getting stuck red after switching
+// engines and back - not a real connectivity problem.
+let fetchModelsToken = 0
+
 async function fetchModels() {
+  const token = ++fetchModelsToken
   try {
     const fetched = await getModels()
+    if (token !== fetchModelsToken) return
     if (fetched && fetched.length > 0) {
       isCurrentEngineOnline.value = true
       models.value = fetched
@@ -208,6 +232,12 @@ async function fetchModels() {
           name,
           desc: m.desc || size,
           size: m.size,
+          // Ollama's /api/tags detail block (parameter_size, quantization_level)
+          // - carried through so vramEstimator.js can size the KV cache off the
+          // real parameter count instead of only the file size. Absent for a
+          // plain string model entry, which vramEstimator.js falls back
+          // gracefully for (parses the size out of the model name instead).
+          details: typeof m === 'object' ? m.details : undefined,
         }
         })
     } else {
@@ -215,9 +245,12 @@ async function fetchModels() {
       models.value = []
     }
   } catch (err) {
+    if (token !== fetchModelsToken) return
     isCurrentEngineOnline.value = false
     models.value = []
   }
+
+  if (token !== fetchModelsToken) return
 
   if (models.value.length > 0) {
     const exists = models.value.some((m) => m.name === selectedModel.value)
@@ -302,6 +335,10 @@ function deleteChat(id) {
   deleteConversation(deletedConversation, selectedModel.value).catch((error) => {
     console.error('Failed to delete conversation from storage:', error)
   })
+  // A pinned note that outlives the conversation it came from is a dangling
+  // reference nobody can act on (its "jump to conversation" would go
+  // nowhere) - clear those out along with the conversation itself.
+  unpinAllFromConversation(id)
 
   if (activeConversationId.value === id) {
     if (conversations.length > 0) {
@@ -397,6 +434,32 @@ function moveChatToFolder(chatId, targetFolderId) {
 
 const attachToast = ref('')
 const sendErrorToast = ref('')
+const vramWarningToast = ref('')
+
+// VRAM Guard (#15): warns once per distinct model+context+limit combination
+// rather than on every single message - the estimate doesn't change between
+// sends within the same setup, so repeating the same warning every turn
+// would just be noise the user learns to ignore.
+const vramWarnedKeys = new Set()
+
+function checkVramWarning() {
+  const model = models.value.find((m) => m.name === selectedModel.value)
+  if (!model) return
+  const settings = getSettings()
+  const numCtx = settings.activeEngine === 'pc'
+    ? (settings.numCtxPc || settings.numCtx || 8192)
+    : (settings.numCtxLaptop || settings.numCtx || 4096)
+  const vramLimitGb = settings.vramLimitGb || 8
+  const status = getVramGuardStatus({ model, numCtx, vramLimitGb })
+  if (status.level !== 'warning' && status.level !== 'critical') return
+
+  const key = `${model.name}::${numCtx}::${vramLimitGb}`
+  if (vramWarnedKeys.has(key)) return
+  vramWarnedKeys.add(key)
+
+  vramWarningToast.value = `VRAM Guard: ${status.description}`
+  setTimeout(() => { vramWarningToast.value = '' }, 8000)
+}
 
 function stopGeneration() {
   if (abortController) {
@@ -428,12 +491,20 @@ async function sendMessage(text, files = [], images = []) {
 
   // Check model
   if (!selectedModel.value) {
-    activeConversation.value.messages.push({
-      role: 'assistant',
+    appendMessage(activeConversation.value, createNode('assistant', {
       content: 'Tidak ada model yang dipilih.',
-    })
+    }))
     return
   }
+
+  // Settings > Keamanan & Web > "Secret Key Auto-Masking" - applied here,
+  // before the text becomes part of the stored message, so a masked secret
+  // never reaches Ollama OR sits in plaintext in chat history/localStorage.
+  if (getSettings().secretMaskingEnabled !== false && text) {
+    text = maskSecrets(text)
+  }
+
+  checkVramWarning()
 
   let ingestResults = []
   if (files && files.length) {
@@ -462,12 +533,11 @@ async function sendMessage(text, files = [], images = []) {
   const fullText = attachedNote ? `${attachedNote}${text ? `\n\n${text}` : ''}` : text
 
   // Add user message
-  activeConversation.value.messages.push({
-    role: 'user',
+  appendMessage(activeConversation.value, createNode('user', {
     content: fullText,
     hasAttachment: ingestResults.some((r) => r.ok) || undefined,
     images: imageBase64.length ? imageBase64 : undefined,
-  })
+  }))
 
   // Set title from first message
   if (!activeConversation.value.title) {
@@ -489,15 +559,88 @@ async function sendMessage(text, files = [], images = []) {
 function handleRegenerate() {
   const conv = activeConversation.value
   if (!conv || isGenerating.value) return
-  // Remove the last assistant message if present
-  for (let i = conv.messages.length - 1; i >= 0; i--) {
-    if (conv.messages[i].role === 'assistant') {
-      conv.messages.splice(i, 1)
-      break
-    }
-  }
-  // Generate new response
+  // Rewinds the active path back to the parent user message - the old reply
+  // is kept (reachable via the "‹ n/m ›" branch switcher on that message, see
+  // MessageBubble.vue), not deleted. generateAssistantResponse() below then
+  // attaches the fresh reply as a new sibling branch of it.
+  retractLastReply(conv)
   generateAssistantResponse()
+}
+
+/**
+ * Inline-edit of a past USER message (see MessageBubble.vue's edit button).
+ * Creates a new branch from that point - exactly like handleRegenerate(),
+ * but for the user's own message instead of the assistant's reply - then
+ * generates a fresh reply under it. Blocked while a reply is streaming, same
+ * as regenerate: rewriting history mid-stream would race the tokens still
+ * being appended to the branch this edit is about to abandon.
+ */
+function handleEditMessage(index, newText) {
+  const conv = activeConversation.value
+  if (!conv || isGenerating.value) return
+  const trimmed = newText.trim()
+  if (!trimmed) return
+  const target = conv.messages[index]
+  if (!target || target.role !== 'user') return
+
+  editMessage(conv, target.id, { content: trimmed })
+  saveConversation(conv, selectedModel.value).catch((error) => {
+    console.error('Conversation memory save (edit) failed:', error)
+  })
+  generateAssistantResponse()
+}
+
+/**
+ * A ClarificationCard's answers (see ClarificationCard.vue) come back here as
+ * a ready-to-send plain-text summary, not raw JSON - the model gets exactly
+ * what it would have gotten from the user typing the same answer by hand, so
+ * no special-case handling is needed anywhere downstream (history, RAG,
+ * memory all see an ordinary user message).
+ */
+function handleClarifySubmit(payload) {
+  if (isGenerating.value) return
+  sendMessage(payload.summaryText)
+}
+
+/** Pin icon on an assistant message (#24) - see MessageBubble.vue / pinnedNotes.js. */
+function handlePinMessage(index) {
+  const conv = activeConversation.value
+  const message = conv?.messages[index]
+  if (!conv || !message?.content) return
+  pinNote({ conversationId: conv.id, conversationTitle: conv.title, content: message.content })
+}
+
+/** StandupJournal.vue's "Kirim ke AI" (#22) - sends the compiled entry through the normal send pipeline, as if the user had typed it. */
+function handleStandupSendToAi(markdown) {
+  showStandupJournal.value = false
+  sendMessage(markdown)
+}
+
+/** TerminalLogAnalyzer.vue's "Kirim ke AI untuk Analisis" (#13). */
+function handleTerminalSendToAi(prompt) {
+  showTerminalAnalyzer.value = false
+  sendMessage(prompt)
+}
+
+function handleJumpToConversation(conversationId) {
+  if (conversations.some((c) => c.id === conversationId)) {
+    activeConversationId.value = conversationId
+    saveState()
+  }
+  showPinnedNotes.value = false
+}
+
+/** "‹ ›" branch navigation on a message with sibling versions - see MessageBubble.vue. */
+function handleSwitchBranch(index, delta) {
+  const conv = activeConversation.value
+  if (!conv || isGenerating.value) return
+  const target = conv.messages[index]
+  if (!target) return
+
+  switchBranch(conv, target.id, delta)
+  saveConversation(conv, selectedModel.value).catch((error) => {
+    console.error('Conversation memory save (branch switch) failed:', error)
+  })
 }
 
 // Model Auto: when enabled, pick the model for THIS message based on the
@@ -547,12 +690,11 @@ async function generateAssistantResponse(draftToRestoreOnFailure) {
   autoModelActiveModel.value = modelForThisMessage
 
   // Add empty assistant message for streaming
-  conv.messages.push({
-    role: 'assistant',
+  appendMessage(conv, createNode('assistant', {
     content: '',
     model: modelForThisMessage,
     rating: null,
-  })
+  }))
   const assistantIdx = conv.messages.length - 1
   let exchangeRemovedOnFailure = false
   isGenerating.value = true
@@ -603,14 +745,15 @@ async function generateAssistantResponse(draftToRestoreOnFailure) {
         // Remove the failed exchange (user message + the empty/partial
         // assistant placeholder) rather than leaving a dead-end error bubble,
         // and give the user their typed text back so retrying doesn't mean
-        // retyping it. This shifts every index after it, so the finally
-        // block below must not touch assistantIdx once this has run.
-        const userIdx = assistantIdx - 1
-        if (conv.messages[userIdx]?.role === 'user') {
-          conv.messages.splice(userIdx, 2)
-        } else {
-          conv.messages.splice(assistantIdx, 1)
-        }
+        // retyping it. Both nodes were only just added by appendMessage()
+        // moments ago, so they're guaranteed to still be childless leaves -
+        // deleteLeaf() can safely unwind them from the tree. This shifts
+        // every index after it, so the finally block below must not touch
+        // assistantIdx once this has run.
+        const assistantNode = conv.messages[assistantIdx]
+        const userNode = conv.messages[assistantIdx - 1]
+        deleteLeaf(conv, assistantNode.id)
+        if (userNode?.role === 'user') deleteLeaf(conv, userNode.id)
         // If this was a brand new conversation's very first (now-removed)
         // message, undo the title sendMessage() optimistically set from it -
         // otherwise the title would be stuck describing a message that no
@@ -839,6 +982,14 @@ function saveState() {
         messages: c.messages,
         folderId: c.folderId || null,
         createdAt: c.createdAt,
+        // Message-branching tree (see messageTree.js) - `messages` above is
+        // only ever the *active* path; a branch created by editing/
+        // regenerating a past message lives only here. Undefined for a
+        // conversation the tree helpers haven't touched yet, which is fine -
+        // ensureTreeShape() rebuilds it from `messages` on first use.
+        nodes: c.nodes,
+        rootChildrenIds: c.rootChildrenIds,
+        activeRootId: c.activeRootId,
       })),
       folders: folders.map((f) => ({
         id: f.id,
@@ -970,6 +1121,18 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
         </div>
       </Transition>
 
+      <!-- VRAM Guard Toast (#15) - see checkVramWarning(), fired once per
+           model+context+limit combo rather than on every single message. -->
+      <Transition name="slide-down">
+        <div v-if="vramWarningToast" class="fallback-toast-alert glass">
+          <AlertCircle :size="15" />
+          <span>{{ vramWarningToast }}</span>
+          <button class="toast-dismiss-btn" @click="vramWarningToast = ''">
+            <X :size="12" />
+          </button>
+        </div>
+      </Transition>
+
       <!-- Top Bar -->
       <header class="top-bar">
         <div class="top-bar-left">
@@ -994,6 +1157,33 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
           >
             <Gauge :size="14" />
             <span>Performa</span>
+          </button>
+          <button
+            class="performance-btn"
+            @click="showPinnedNotes = true"
+            title="Key Notes: catatan/balasan AI yang sudah disematkan"
+            id="pinned-notes-btn"
+          >
+            <Pin :size="14" />
+            <span>Catatan</span>
+          </button>
+          <button
+            class="performance-btn"
+            @click="showStandupJournal = true"
+            title="Standup / Journal: refleksi harian terstruktur"
+            id="standup-journal-btn"
+          >
+            <ClipboardList :size="14" />
+            <span>Standup</span>
+          </button>
+          <button
+            class="performance-btn"
+            @click="showTerminalAnalyzer = true"
+            title="Analisis Log Error: tempel log terminal mentah untuk dianalisis"
+            id="terminal-analyzer-btn"
+          >
+            <Terminal :size="14" />
+            <span>Log</span>
           </button>
           <span
             v-if="contextUsage"
@@ -1048,11 +1238,16 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
         :is-generating="isGenerating"
         :model-name="selectedModel"
         :supports-images="modelSupportsImages"
+        :conversation-id="activeConversation?.id || ''"
         :generation-elapsed-seconds="generationElapsedSeconds"
         @send="sendMessage"
         @stop="stopGeneration"
         @regenerate="handleRegenerate"
         @rate-message="handleRateMessage"
+        @edit-message="handleEditMessage"
+        @switch-branch="handleSwitchBranch"
+        @clarify-submit="handleClarifySubmit"
+        @pin-message="handlePinMessage"
       />
 
       <WorkspaceView v-else :selected-model="selectedModel" />
@@ -1064,6 +1259,7 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       :conversations="conversations"
       :folders="folders"
       :models="models"
+      :selected-model="selectedModel"
       :app-mode="appMode"
       @close="closeSettings"
       @save="onSettingsSave"
@@ -1082,6 +1278,27 @@ function loadState({ includeConversations = true, includeFolders = true } = {}) 
       v-if="showModelManager"
       @close="showModelManager = false"
       @models-changed="fetchModels"
+    />
+
+    <!-- Key Notes Drawer (#24) -->
+    <PinnedNotesDrawer
+      v-if="showPinnedNotes"
+      @close="showPinnedNotes = false"
+      @jump-to-conversation="handleJumpToConversation"
+    />
+
+    <!-- Standup / Journal (#22) -->
+    <StandupJournal
+      v-if="showStandupJournal"
+      @close="showStandupJournal = false"
+      @send-to-ai="handleStandupSendToAi"
+    />
+
+    <!-- Terminal Output Parser (#13) -->
+    <TerminalLogAnalyzer
+      v-if="showTerminalAnalyzer"
+      @close="showTerminalAnalyzer = false"
+      @send-to-ai="handleTerminalSendToAi"
     />
   </div>
 </template>
