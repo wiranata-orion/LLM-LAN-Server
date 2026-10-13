@@ -186,6 +186,7 @@ export async function sendWorkspaceChat(
     handlers: WorkspaceChatHandlers
   },
 ): Promise<void> {
+  const settings = getSettings()
   let response: Response
   try {
     response = await fetch(`${getAgentApiUrl()}/workspace/chat`, {
@@ -201,6 +202,8 @@ export async function sendWorkspaceChat(
         attachments,
         ollamaBaseUrl: resolveOllamaBaseUrl(),
         options: resolveChatOptions(),
+        autoUnloadEnabled: settings.autoUnloadEnabled !== false,
+        autoUnloadMinutes: Math.min(10080, Math.max(1, Math.round(Number(settings.autoUnloadMinutes) || 2))),
       }),
     })
   } catch (error) {

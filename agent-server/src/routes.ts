@@ -85,6 +85,10 @@ const chatSchema = z.object({
   // web-fetch.ts) for this request only, instead of a fixed backend default.
   webFetchTimeoutMs: z.number().int().positive().max(120_000).optional(),
   webFetchUserAgent: z.string().max(300).optional(),
+  // Ollama model residency for this chat request. Disabled auto-unload maps to
+  // keep_alive=-1; otherwise the user-selected idle duration is in minutes.
+  autoUnloadEnabled: z.boolean().optional(),
+  autoUnloadMinutes: z.number().int().min(1).max(10_080).optional(),
   messages: z.array(z.object({
     role: z.enum(['system', 'user', 'assistant', 'tool']),
     content: z.string(),
@@ -339,6 +343,11 @@ export function createRouter(context: AppContext): Router {
     try {
       const body = chatSchema.parse(request.body)
       const { orchestrator } = context.current
+      const keepAlive = body.autoUnloadEnabled === undefined && body.autoUnloadMinutes === undefined
+        ? undefined
+        : body.autoUnloadEnabled === false
+          ? '-1'
+          : `${body.autoUnloadMinutes ?? 2}m`
 
       if (body.stream) {
         response.status(200)
@@ -366,6 +375,7 @@ export function createRouter(context: AppContext): Router {
             body.useContextRetrieval,
             body.customInstructions,
             { timeoutMs: body.webFetchTimeoutMs, userAgent: body.webFetchUserAgent },
+            keepAlive,
           )
           response.write(`${JSON.stringify({ type: 'meta', toolRounds: result.toolRounds, retrievedChunks: result.retrievedChunks, memoryId: result.memoryId, performance: result.performance })}\n`)
           response.write(`${JSON.stringify({ type: 'done' })}\n`)
@@ -394,6 +404,7 @@ export function createRouter(context: AppContext): Router {
         body.useContextRetrieval,
         body.customInstructions,
         { timeoutMs: body.webFetchTimeoutMs, userAgent: body.webFetchUserAgent },
+        keepAlive,
       )
       response.json({
         ok: true,

@@ -7,6 +7,12 @@ import { getPinnedNotes, unpinNote } from '../services/pinnedNotes.js'
 // identically (code blocks, tables, math, ...) instead of showing raw
 // markdown syntax as plain text.
 import { renderMarkdown } from '../services/markdownRenderer.js'
+import { parseChainOfThought } from '../services/cotParser.js'
+
+function renderNoteContent(content) {
+  const parsed = parseChainOfThought(content)
+  return renderMarkdown(parsed.hasThought ? parsed.answer : content)
+}
 
 const emit = defineEmits(['close', 'jump-to-conversation'])
 
@@ -81,7 +87,7 @@ const groupedByConversation = computed(() => {
             </button>
             <div v-for="note in group.notes" :key="note.id" class="pinned-note-card">
               <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown() is the same markdown-it pipeline MessageBubble.vue uses, with html:false -->
-              <div class="pinned-note-content markdown-body" v-html="renderMarkdown(note.content)"></div>
+              <div class="pinned-note-content markdown-body" v-html="renderNoteContent(note.content)"></div>
               <div class="pinned-note-footer">
                 <span class="pinned-note-date">{{ formatDate(note.pinnedAt) }}</span>
                 <div class="pinned-note-actions">

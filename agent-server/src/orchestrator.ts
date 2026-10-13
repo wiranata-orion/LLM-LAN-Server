@@ -331,6 +331,7 @@ export class AgentOrchestrator {
     // (see web-fetch.ts) - undefined fields there fall back to its own
     // built-in defaults, same as before this existed.
     webFetchOptions?: { timeoutMs?: number; userAgent?: string },
+    keepAlive?: string,
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl, customInstructions)
@@ -340,7 +341,7 @@ export class AgentOrchestrator {
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
       const generationStartedAt = Date.now()
-      const response = await chat(messages, toolDefinitions, model, options, ollamaBaseUrl, signal)
+      const response = await chat(messages, toolDefinitions, model, options, ollamaBaseUrl, signal, keepAlive)
       const generationMs = Date.now() - generationStartedAt
       logTurnTiming('generation', ollamaBaseUrl, generationMs, formatOllamaStats(response))
       messages.push(response.message)
@@ -382,6 +383,7 @@ export class AgentOrchestrator {
     useContextRetrieval = true,
     customInstructions?: string,
     webFetchOptions?: { timeoutMs?: number; userAgent?: string },
+    keepAlive?: string,
   ): Promise<AgentResponse> {
     const prepareStartedAt = Date.now()
     const { messages, retrievedChunks } = await this.prepareContext(input, conversationId, options?.num_ctx, onMemoryEvent, useContextRetrieval, ollamaBaseUrl, customInstructions)
@@ -391,7 +393,7 @@ export class AgentOrchestrator {
     for (let round = 0; round < config.maxToolRounds; round += 1) {
       signal?.throwIfAborted()
       const generationStartedAt = Date.now()
-      const response = await chatStream(messages, toolDefinitions, model, onToken, options, ollamaBaseUrl, signal)
+      const response = await chatStream(messages, toolDefinitions, model, onToken, options, ollamaBaseUrl, signal, keepAlive)
       const generationMs = Date.now() - generationStartedAt
       logTurnTiming('generation', ollamaBaseUrl, generationMs, formatOllamaStats(response))
       messages.push(response.message)

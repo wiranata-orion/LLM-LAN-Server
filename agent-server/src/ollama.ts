@@ -174,6 +174,7 @@ async function requestChat(
   options?: ChatOptions,
   baseUrl: string = config.ollamaBaseUrl,
   signal?: AbortSignal,
+  keepAlive?: string,
 ): Promise<Response> {
   const canUseTools = tools.length > 0 && await supportsTools(model, baseUrl)
   const hasOptions = options && Object.values(options).some((value) => value !== undefined && value !== null && value !== '')
@@ -195,7 +196,7 @@ async function requestChat(
       // pressure from another model forces an early evict) unloads the model
       // between turns - the reload from disk before the next reply can take
       // far longer than the actual generation itself. See config.ts.
-      keep_alive: resolveKeepAlive(config.ollamaKeepAlive),
+      keep_alive: resolveKeepAlive(keepAlive ?? config.ollamaKeepAlive),
     }),
   }, signal)
 
@@ -239,8 +240,9 @@ export async function chat(
   options?: ChatOptions,
   baseUrl?: string,
   signal?: AbortSignal,
+  keepAlive?: string,
 ): Promise<OllamaChatResponse> {
-  return chatStream(messages, tools, model, () => {}, options, baseUrl, signal)
+  return chatStream(messages, tools, model, () => {}, options, baseUrl, signal, keepAlive)
 }
 
 /**
@@ -258,8 +260,9 @@ export async function chatStream(
   options?: ChatOptions,
   baseUrl?: string,
   signal?: AbortSignal,
+  keepAlive?: string,
 ): Promise<OllamaChatResponse> {
-  const response = await requestChat(messages, tools, model, options, baseUrl, signal)
+  const response = await requestChat(messages, tools, model, options, baseUrl, signal, keepAlive)
   if (!response.ok) await parseError(response)
   if (!response.body) throw new OllamaError('Ollama returned no stream body')
 

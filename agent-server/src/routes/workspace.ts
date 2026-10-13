@@ -49,6 +49,9 @@ const workspaceChatSchema = z.object({
   mode: z.enum(['code', 'ask']).optional(),
   // Files/line ranges the user explicitly attached as context from the UI.
   attachments: z.array(contextAttachmentSchema).optional(),
+  // Ollama model residency for this workspace chat request.
+  autoUnloadEnabled: z.boolean().optional(),
+  autoUnloadMinutes: z.number().int().min(1).max(10_080).optional(),
 })
 
 const saveChatSessionSchema = z.object({
@@ -281,6 +284,12 @@ export function createWorkspaceRouter(): Router {
         budgetExceeded: context.budgetExceeded,
       })
 
+      const keepAlive = body.autoUnloadEnabled === undefined && body.autoUnloadMinutes === undefined
+        ? undefined
+        : body.autoUnloadEnabled === false
+          ? '-1'
+          : `${body.autoUnloadMinutes ?? 2}m`
+
       try {
         await chatStream(
           context.messages,
@@ -290,6 +299,7 @@ export function createWorkspaceRouter(): Router {
           body.options,
           body.ollamaBaseUrl,
           upstreamAbort.signal,
+          keepAlive,
         )
         write({ type: 'done' })
         response.end()

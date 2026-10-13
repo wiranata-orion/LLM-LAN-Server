@@ -27,6 +27,7 @@ import {
   Cpu,
   ShieldCheck,
   PlayCircle,
+  Clock,
 } from 'lucide-vue-next'
 import {
   getSettings,
@@ -90,6 +91,8 @@ const activeEngine = ref('laptop')
 const pcUrl = ref('http://192.168.1.50:11434')
 const laptopUrl = ref('http://localhost:11434')
 const autoFallback = ref(true)
+const autoUnloadEnabled = ref(true)
+const autoUnloadMinutes = ref(2)
 const theme = ref('xufruz')
 const initialTheme = ref('xufruz')
 const customTheme = ref({ ...DEFAULT_SETTINGS.customTheme })
@@ -534,6 +537,8 @@ function loadCurrentSettings() {
   pcUrl.value = s.pcUrl ? s.pcUrl : 'http://192.168.1.50:11434'
   laptopUrl.value = s.laptopUrl ? s.laptopUrl : 'http://localhost:11434'
   autoFallback.value = s.autoFallback !== false
+  autoUnloadEnabled.value = s.autoUnloadEnabled !== false
+  autoUnloadMinutes.value = Math.min(10080, Math.max(1, Math.round(Number(s.autoUnloadMinutes) || 2)))
   theme.value = s.theme || 'xufruz'
   initialTheme.value = s.theme || 'xufruz'
   customTheme.value = { ...DEFAULT_SETTINGS.customTheme, ...(s.customTheme || {}) }
@@ -627,6 +632,10 @@ const temperatureDesc = computed(() => {
 
 function setTemperaturePreset(val) {
   temperature.value = val
+}
+
+function setAutoUnloadPreset(mins) {
+  autoUnloadMinutes.value = mins
 }
 
 function setNumCtxPreset(val) {
@@ -800,6 +809,8 @@ function saveSettings() {
     pcUrl: pcUrl.value.trim(),
     laptopUrl: laptopUrl.value.trim(),
     autoFallback: autoFallback.value,
+    autoUnloadEnabled: autoUnloadEnabled.value,
+    autoUnloadMinutes: Math.min(10080, Math.max(1, Math.round(Number(autoUnloadMinutes.value) || 2))),
     theme: theme.value,
     customTheme: { ...customTheme.value },
     numCtx: activeFinalCtx,
@@ -849,6 +860,8 @@ function resetDefaults() {
   pcUrl.value = DEFAULT_SETTINGS.pcUrl || 'http://192.168.1.50:11434'
   laptopUrl.value = DEFAULT_SETTINGS.laptopUrl || 'http://localhost:11434'
   autoFallback.value = DEFAULT_SETTINGS.autoFallback !== false
+  autoUnloadEnabled.value = DEFAULT_SETTINGS.autoUnloadEnabled !== false
+  autoUnloadMinutes.value = DEFAULT_SETTINGS.autoUnloadMinutes || 2
   const defaultTheme = DEFAULT_SETTINGS.theme || 'xufruz'
   theme.value = defaultTheme
   document.documentElement.setAttribute('data-theme', defaultTheme)
@@ -1424,6 +1437,103 @@ function resetDefaults() {
                   1.0 Kreatif
                 </button>
               </div>
+            </div>
+
+            <!-- Ollama Model Residency / Auto-Unload (Keep Alive) -->
+            <div class="setting-toggle-box glass">
+              <div class="toggle-info">
+                <div class="toggle-title-row">
+                  <Clock :size="15" class="toggle-icon" />
+                  <span class="toggle-title">Unload Model Otomatis (Keep Alive)</span>
+                  <span class="chip-info" :class="autoUnloadEnabled ? 'chip-info--highlight' : ''">
+                    {{ autoUnloadEnabled ? `${autoUnloadMinutes || 2} Menit` : 'Tetap di VRAM (Mati)' }}
+                  </span>
+                </div>
+                <span class="form-hint">
+                  {{ autoUnloadEnabled
+                    ? 'Setelah tidak dipakai selama durasi yang ditentukan, model dilepas dari VRAM/RAM untuk menghemat memori.'
+                    : 'Fitur unload dimatikan. Model akan tetap standby di VRAM/RAM agar respon berikutnya instan tanpa reload.' }}
+                </span>
+              </div>
+              <label class="switch">
+                <input v-model="autoUnloadEnabled" type="checkbox" />
+                <span class="slider round"></span>
+              </label>
+            </div>
+
+            <div v-if="autoUnloadEnabled" class="form-group auto-unload-card">
+              <div class="label-with-badge">
+                <label class="form-label" for="auto-unload-minutes">Durasi Idle Sebelum Unload: {{ autoUnloadMinutes || 2 }} menit</label>
+              </div>
+              <div class="slider-wrapper">
+                <input
+                  id="auto-unload-minutes"
+                  v-model.number="autoUnloadMinutes"
+                  type="range"
+                  min="1"
+                  max="60"
+                  step="1"
+                  class="range-slider"
+                />
+                <div class="slider-ticks">
+                  <span @click="setAutoUnloadPreset(2)">2m (Bawaan)</span>
+                  <span @click="setAutoUnloadPreset(5)">5m</span>
+                  <span @click="setAutoUnloadPreset(15)">15m</span>
+                  <span @click="setAutoUnloadPreset(30)">30m</span>
+                  <span @click="setAutoUnloadPreset(60)">60m</span>
+                </div>
+              </div>
+
+              <!-- Quick Presets for Auto Unload -->
+              <div class="preset-buttons-row">
+                <button
+                  class="btn-micro-preset"
+                  :class="{ 'btn-micro-preset--active': Number(autoUnloadMinutes) === 2 }"
+                  @click="setAutoUnloadPreset(2)"
+                >
+                  2 Menit (Bawaan)
+                </button>
+                <button
+                  class="btn-micro-preset"
+                  :class="{ 'btn-micro-preset--active': Number(autoUnloadMinutes) === 5 }"
+                  @click="setAutoUnloadPreset(5)"
+                >
+                  5 Menit
+                </button>
+                <button
+                  class="btn-micro-preset"
+                  :class="{ 'btn-micro-preset--active': Number(autoUnloadMinutes) === 15 }"
+                  @click="setAutoUnloadPreset(15)"
+                >
+                  15 Menit
+                </button>
+                <button
+                  class="btn-micro-preset"
+                  :class="{ 'btn-micro-preset--active': Number(autoUnloadMinutes) === 30 }"
+                  @click="setAutoUnloadPreset(30)"
+                >
+                  30 Menit
+                </button>
+                <button
+                  class="btn-micro-preset"
+                  :class="{ 'btn-micro-preset--active': Number(autoUnloadMinutes) === 60 }"
+                  @click="setAutoUnloadPreset(60)"
+                >
+                  1 Jam
+                </button>
+              </div>
+              <p class="form-hint" style="margin-top: 6px;">
+                Atau ketik durasi kustom (1 - 10080 menit / maks 7 hari):
+              </p>
+              <input
+                v-model.number="autoUnloadMinutes"
+                class="form-input form-input--compact"
+                type="number"
+                min="1"
+                max="10080"
+                step="1"
+                placeholder="Menit (1 - 10080)"
+              />
             </div>
 
             <!-- Max Tokens -->

@@ -97,6 +97,10 @@ const WIDGET_TAGS = ['mermaid', 'clarify', 'flashcards', 'mindmap', 'decision-ma
 export function stripForSpeech(markdown) {
   let text = markdown || ''
 
+  // 0. Reasoning / Chain of Thought blocks - removed so TTS doesn't narrate internal thoughts
+  text = text.replace(/<(think|thought|reasoning)>[\s\S]*?<\/\1>/gi, ' ')
+  text = text.replace(/<(think|thought|reasoning)>[\s\S]*$/gi, ' ')
+
   // 1. Fenced code blocks and widget blocks - entirely removed, not narrated
   //    (reading "graph TD, A dash dash greater than B" aloud helps no one).
   text = text.replace(/```(?:[a-zA-Z0-9_-]+)?\n[\s\S]*?```/g, ' ')

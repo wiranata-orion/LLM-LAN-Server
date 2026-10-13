@@ -15,6 +15,8 @@ import MermaidDiagram from './MermaidDiagram.vue'
 import FlashcardDeck from './FlashcardDeck.vue'
 import MindMap from './MindMap.vue'
 import DecisionMatrix from './DecisionMatrix.vue'
+import ReasoningBlock from './ReasoningBlock.vue'
+import { parseChainOfThought } from '../services/cotParser.js'
 
 const props = defineProps({
   message: {
@@ -56,7 +58,30 @@ const emit = defineEmits(['edit', 'switch-branch', 'clarify-submit', 'pin'])
 
 const isUser = computed(() => props.message.role === 'user')
 const isAssistant = computed(() => props.message.role === 'assistant')
-const isThinking = computed(() => isAssistant.value && props.isGenerating && !props.message.content)
+
+const cotData = computed(() => {
+  if (!isAssistant.value) {
+    return { hasThought: false, thought: '', answer: '', isThinking: false, wordCount: 0 }
+  }
+  const fromContent = parseChainOfThought(props.message.content || '')
+  if (fromContent.hasThought) {
+    return fromContent
+  }
+  const separateThought = props.message.reasoning || props.message.thinking || props.message.reasoning_content
+  if (separateThought) {
+    const trimmed = String(separateThought).trim()
+    return {
+      hasThought: Boolean(trimmed),
+      thought: trimmed,
+      answer: props.message.content || '',
+      isThinking: props.isGenerating && !props.message.content,
+      wordCount: trimmed ? trimmed.split(/\s+/).length : 0,
+    }
+  }
+  return fromContent
+})
+
+const isThinking = computed(() => isAssistant.value && props.isGenerating && !props.message.content && !cotData.value.hasThought)
 const elapsedLabel = computed(() => formatDuration(props.elapsedSeconds * 1000))
 
 // ---- Inline edit (user messages only) ----
@@ -122,9 +147,11 @@ const WIDGET_PARSERS = [parseClarificationSegments, parseMermaidSegments, parseF
 
 const assistantSegments = computed(() => {
   if (!isAssistant.value) return []
+  const textContent = cotData.value.hasThought ? cotData.value.answer : props.message.content
+  if (!textContent) return []
   return WIDGET_PARSERS.reduce(
     (segments, parse) => segments.flatMap((segment) => (segment.type === 'text' ? parse(segment.content) : [segment])),
-    [{ type: 'text', content: props.message.content }],
+    [{ type: 'text', content: textContent }],
   )
 })
 
@@ -135,7 +162,7 @@ function handleClarifySubmit(payload) {
 
 // ---- Pin / bookmark (assistant messages only - see pinnedNotes.js) ----
 const isPinned = computed(() => (
-  isAssistant.value && !!props.message.content && isNotePinned(props.conversationId, props.message.content)
+  isAssistant.value && !!props.message.content && isNotePinned(props.conversationId, cotData.value.hasThought ? cotData.value.answer : props.message.content)
 ))
 
 function togglePin() {
@@ -145,7 +172,7 @@ function togglePin() {
 
 // ---- Text-to-speech (#1) - see services/speech.js ----
 const ttsSupported = isTtsSupported()
-const strippedForSpeech = computed(() => stripForSpeech(props.message.content))
+const strippedForSpeech = computed(() => stripForSpeech(cotData.value.hasThought ? cotData.value.answer : props.message.content))
 // Derived from the one shared speakingText ref rather than local state - see
 // speech.js for why (speechSynthesis is a single global resource).
 const isSpeakingThis = computed(() => !!strippedForSpeech.value && speakingText.value === strippedForSpeech.value)
@@ -232,6 +259,15 @@ watch(() => props.isGenerating, (generating, wasGenerating) => {
       </div>
 
       <div v-else-if="isAssistant" class="message-bubble message-bubble--assistant">
+        <!-- Chain of Thought (CoT) / Reasoning Tokens -->
+        <ReasoningBlock
+          v-if="cotData.hasThought"
+          :thought="cotData.thought"
+          :is-thinking="cotData.isThinking && isGenerating"
+          :word-count="cotData.wordCount"
+          :is-generating="isGenerating"
+        />
+
         <template v-for="(segment, index) in assistantSegments" :key="index">
           <div v-if="segment.type === 'text'" class="markdown-body" v-html="renderMarkdown(segment.content)"></div>
           <ClarificationCard v-else-if="segment.type === 'clarify'" :schema="segment.schema" @submit="handleClarifySubmit" />

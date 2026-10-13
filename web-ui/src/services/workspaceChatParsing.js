@@ -22,7 +22,11 @@
  * the outer block at the FIRST nested ``` it hits, and everything after that
  * point renders with prose/code roles flipped for the rest of the message.
  */
-export function parseWorkspaceReplySegments(content, options = {}) {
+import { parseChainOfThought } from './cotParser.js'
+
+export function parseWorkspaceReplySegments(rawContent, options = {}) {
+  const cot = parseChainOfThought(rawContent)
+  const content = cot.hasThought ? cot.answer : (rawContent || '')
   const lines = content.split('\n')
   const segments = []
   let inCode = false

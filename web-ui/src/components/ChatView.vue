@@ -198,11 +198,15 @@ const features = [
   { icon: Zap, title: 'Multi Model', desc: 'Model sesuai kebutuhan' },
 ]
 
+import { parseChainOfThought } from '../services/cotParser.js'
+
 // Tracks which message's Copy button most recently succeeded, so only that
 // one button flips to "Copied" instead of every Copy button at once.
 const copiedIndex = ref(null)
 function copyContent(text, index) {
-  navigator.clipboard.writeText(text)
+  const parsed = parseChainOfThought(text)
+  const textToCopy = parsed.hasThought && parsed.answer ? parsed.answer : text
+  navigator.clipboard.writeText(textToCopy)
   copiedIndex.value = index
   setTimeout(() => {
     if (copiedIndex.value === index) copiedIndex.value = null

@@ -12,6 +12,8 @@ export const DEFAULT_SETTINGS = {
   pcUrl: 'http://192.168.1.50:11434',
   laptopUrl: 'http://localhost:11434',
   autoFallback: true,
+  autoUnloadEnabled: true,
+  autoUnloadMinutes: 2,
   theme: 'xufruz', // 'xufruz' | 'cyberpunk' | 'oled' | 'light' | 'grey' | 'dark'
   // A 2048 window was too small to hold a real conversation once retrieved
   // context was added on top, so the model kept losing what was said earlier.
@@ -348,6 +350,9 @@ export async function sendMessageStream({
     model: model,
     messages: messages,
     stream: true,
+    keep_alive: settings.autoUnloadEnabled === false
+      ? -1
+      : `${Math.min(10080, Math.max(1, Math.round(Number(settings.autoUnloadMinutes) || 2)))}m`,
     options: {},
   }
 
